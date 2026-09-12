@@ -10,5 +10,14 @@ export function buildApp(): FastifyInstance {
 
   app.get("/healthz", async () => ({ status: "ok" }));
 
+  // Продукта (доски, стикеры) на вехе В1 ещё нет — реализуется по спецификации
+  // на В2+ (docs/spec/). Корень отвечает статусом сервиса вместо 404, чтобы
+  // «сервис поднялся» было видно сразу, а не только по /healthz.
+  app.get("/", async () => ({
+    service: "retro-server",
+    status: "ok",
+    healthz: "/healthz",
+  }));
+
   return app;
 }

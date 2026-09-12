@@ -11,3 +11,14 @@ describe("GET /healthz", () => {
     expect(response.json()).toEqual({ status: "ok" });
   });
 });
+
+describe("GET /", () => {
+  it("отвечает 200, а не 404 — корень не должен выглядеть как упавший сервис", async () => {
+    const app = buildApp();
+
+    const response = await app.inject({ method: "GET", url: "/" });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ status: "ok" });
+  });
+});
