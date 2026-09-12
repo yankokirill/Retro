@@ -28,10 +28,19 @@ if (!top || path.resolve(top) !== path.resolve(root)) process.exit(0);
 const lastCommitSec = Number(git("log", "-1", "--format=%ct"));
 if (!lastCommitSec) process.exit(0);
 
-let journalSec = 0;
+// "Обновлён журнал" значит одно из двух: последний коммит, тронувший
+// journal.md (учитывает случай, когда сам коммит и добавил запись —
+// mtime файла на диске в этот момент ещё старше времени commit), или
+// файл правили на диске позже любого коммита (запись уже готова, просто
+// ещё не закоммичена). Берём максимум, чтобы не ловить оба ложных срабатывания.
+const journalGitSec = Number(git("log", "-1", "--format=%ct", "--", "docs/report/journal.md")) || 0;
+
+let journalMtimeSec = 0;
 try {
-  journalSec = statSync(path.join(root, "docs", "report", "journal.md")).mtimeMs / 1000;
+  journalMtimeSec = statSync(path.join(root, "docs", "report", "journal.md")).mtimeMs / 1000;
 } catch {}
+
+const journalSec = Math.max(journalGitSec, journalMtimeSec);
 
 if (lastCommitSec > journalSec) {
   console.error(
