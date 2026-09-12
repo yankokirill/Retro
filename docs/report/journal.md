@@ -1,0 +1,26 @@
+# Журнал разработки
+
+## 2026-09-13 — Этап 0 / В1 «Продукт поднимается»
+
+- **PR / коммиты:** `b4d1548` — первый коммит проекта (после `CLAUDE.md` и `docs/spec/consistency-model.md` из предыдущей сессии). Прямо в `main`, т.к. `.claude/protect-main` ещё не включён (появится на В3)
+- **Модели:** Opus 5 — план, архитектура, модель согласованности (предыдущая сессия); Sonnet 5 — каркас репозитория, отладка (эта сессия)
+- **Скиллы:** нет (веха В1 — до `implement-req`, задач в `docs/tasks.md` ещё нет)
+- **Агенты:** не запускались
+- **MCP:** не использовались
+- **Что сделал агент:**
+  - npm workspaces: `apps/server` (Fastify + `/healthz`, Drizzle + Postgres), `apps/web` (Vite + React заглушка), `packages/crdt` и `packages/protocol` (пустые заготовки под В2)
+  - `docker-compose.yml` с Postgres 17, первая миграция (`boards`) через drizzle-kit
+  - Biome (формат + линт) и `tsc -b` (project references) как источник `npm run check`, один тест на `/healthz` (Vitest, `app.inject`)
+  - `.github/workflows/ci.yml` — `npm ci && npm run check` на push/PR
+  - README с командами запуска
+- **Руками:** ничего — весь каркас и правки по ходу отладки сделаны в рамках сессии
+- **Расхождения / находки (обнаружено и исправлено в процессе, не автором задним числом):**
+  - `tsc -b` компилировал `*.test.ts` в `dist/`, и Vitest подхватывал скомпилированные тесты повторно → добавлен `exclude` в `tsconfig.json` сервера и `test.exclude` в `vitest.config.ts`
+  - `tsx --env-file=.env` падал с невнятной ошибкой, если `.env` отсутствует → заменено на `--env-file-if-exists=.env`; при реально отсутствующем `DATABASE_URL` теперь падает с понятным сообщением из `src/db/client.ts`
+  - сгенерированные Drizzle файлы (`drizzle/meta/*.json`) не проходили форматирование Biome (нет финального перевода строки) → каталог `drizzle/` целиком исключён из `biome.json` как машинно-генерируемый
+  - TypeScript 7.0.2 и Vitest 5.0.0 — новые мажорные версии; для TypeScript намеренно закреплена последняя стабильная версия линии 5.x (5.9.3) из-за отсутствия опыта работы с поведением `tsc -b` в 7.x, Vitest 5 оставлен как есть (тесты прошли)
+- **Проверено вручную (не только `npm run check`):** `docker compose up -d db` → healthy; `npm run db:migrate` создаёт таблицу `boards` (подтверждено `psql \dt`); `npm run dev:server` → `curl /healthz` → `200 {"status":"ok"}`; `npm run dev:web` → Vite отвечает `200`
+- **Открыто / не сделано:**
+  - remote на GitHub не подключён — в среде нет `gh`/токена, нужно вручную дать `git remote add origin <url>` и запушить
+  - `npm audit`: 4 moderate — транзитивная уязвимость esbuild через `drizzle-kit` (dev-инструмент, риск только для dev-сервера). Не блокирует В1, вернуться на В5 (`check:security`) или при обновлении drizzle-kit
+- **Цена:** не измерялась (интерактивная сессия, не отдельный агентный прогон)
