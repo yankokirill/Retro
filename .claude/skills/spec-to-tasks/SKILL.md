@@ -7,7 +7,7 @@ description: Разбивает требования REQ из docs/spec на з�
 
 ## Шаги
 
-1. Прочитать `docs/spec/requirements.md`, `docs/spec/crdt-semantics.md`, `docs/tasks.md` (если есть), `docs/adr/`.
+1. Прочитать `docs/spec/requirements.md`, `docs/spec/consistency-model.md`, `docs/tasks.md` (если есть), `docs/adr/`.
 2. Найти REQ без задач и задачи, чьи REQ изменились после создания (Changelog спецификации).
 3. Для каждого такого REQ составить задачи по шаблону. Предпочитать **вертикальные срезы** (протокол → сервер → клиент → e2e для одного сценария), а не «весь бэкенд, потом весь фронт».
 4. Размер: S (≤ 2 ч) или M (≤ 1 день). L — разбить дальше.

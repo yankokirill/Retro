@@ -29,7 +29,7 @@ hooks:
 
 ## Как работать
 
-1. Прочитай требование и все связанные строки `crdt-semantics.md`.
+1. Прочитай требование и все связанные строки `consistency-model.md`.
 2. На каждый критерий приёмки — минимум один тест. Имя теста начинается с ID: `it("REQ-012: concurrent moves converge to max(lamport, actorId)", ...)`.
 3. Выбор уровня:
    - поведение ядра доски → unit/property в `packages/crdt/test/`, для конкурентности — fast-check с явным `seed` в выводе;
