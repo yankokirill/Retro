@@ -115,3 +115,60 @@ export interface OpResult {
   readonly clock: Clock;
   readonly dot: Dot;
 }
+
+/**
+ * § 4. Материализованный стикер. `text`/`conflict` — R2 (vals_(id,text),
+ * |text| > 1); `color` — R2 (win_(id,color).v); `votes` — R6
+ * (|{v ∈ active(X) | v.target = id}|; голоса за удалённый стикер в счётчик
+ * не входят, т.к. удалённый стикер сюда не попадает).
+ */
+export interface CardView {
+  readonly id: EntityId;
+  readonly text: readonly string[];
+  readonly conflict: boolean;
+  readonly color: Color;
+  readonly votes: number;
+}
+
+/**
+ * § 4. Материализованная группа. `title`/`conflict` — R2, как у `text`
+ * стикера. `cards` — стикеры этой группы (R3: g* = win_(id,group).v этой
+ * группы), в порядке R5; их собственное поле `place` не используется (R4).
+ */
+export interface GroupView {
+  readonly id: EntityId;
+  readonly title: readonly string[];
+  readonly conflict: boolean;
+  readonly cards: readonly CardView[];
+}
+
+/** Элемент колонки — стикер вне группы или группа целиком (R4). */
+export type Item = CardView | GroupView;
+
+/**
+ * Материализованный action item. § 4 не выписывает эту форму отдельно —
+ * она выведена из таблицы полей `action` (§ 1.4): `text` — «все варианты»
+ * (как у CardView/GroupView), `assignee`/`done` — победитель по метке.
+ */
+export interface ActionView {
+  readonly id: EntityId;
+  readonly text: readonly string[];
+  readonly conflict: boolean;
+  readonly assignee: UserId | null;
+  readonly done: boolean;
+}
+
+/**
+ * § 4. `View = (columns, trash, actions)`.
+ * `trash` — существующие удалённые стикеры и группы (R1), отсортированные
+ * по `id` (R7). Action items в `trash` не попадают: у `action` нет поля
+ * `place`, R1–R4 к ним не применяются — удалённый action item просто не
+ * входит в `actions` (REQ-019: без корзины, это сознательная асимметрия,
+ * а не пропуск).
+ */
+export interface View {
+  readonly columns: ReadonlyMap<Column, readonly Item[]>;
+  readonly trash: readonly EntityId[];
+  /** Отсортированы по `id` (R7). */
+  readonly actions: readonly ActionView[];
+}

@@ -23,6 +23,7 @@ import type {
   Unvote,
   UserId,
   Value,
+  View,
   Vote,
 } from "./types.js";
 
@@ -374,4 +375,35 @@ export function activeVotes(state: State, target?: EntityId): Vote[] {
     result.push(entry);
   }
   return result;
+}
+
+/**
+ * materialize: X → View (§ 4) — то, что видно на экране: чистая функция
+ * **множества** `state`, не порядка, в котором его собирали (I3).
+ *
+ * Ограничение M1: результат зависит от `state` только через `created`,
+ * функции `visible`/`winner`/`values` (vis_k/win_k/vals_k) и `activeVotes`
+ * (active(X)) — реализация не должна использовать ничего сверх этого
+ * (например, порядок вставки в исходные Map).
+ *
+ * Правила R1–R7 (§ 4):
+ * - R1: сущность видна, если `exists(id) ∧ ¬deleted(id)`; удалённая — в
+ *   `trash` (только sticker/group — action items в trash не попадают, у
+ *   них нет `place`, см. JSDoc `View` в types.ts). Записи ячеек без записи
+ *   в `created` игнорируются (операция создания ещё не пришла).
+ * - R2: `text`/`title` = vals_k, `conflict = text.length > 1`; `color` =
+ *   победитель по метке.
+ * - R3: эффективная группа стикера `g* = winner(id, "group").value`, если
+ *   она существует, это `group` и не удалена; иначе `none`.
+ * - R4: стикер с `g* = none` — в своей колонке по `place`; иначе — внутри
+ *   группы, свой `place` не используется.
+ * - R5: порядок внутри колонки/группы — по `(frac, id)` по возрастанию, при
+ *   равных `frac` решает порядок `Dot` (`dotKey`).
+ * - R6: `votes(id) = |{v ∈ activeVotes(state) | v.target === id}|`; голоса
+ *   за удалённый стикер не показываются (удалённый стикер не попадает в
+ *   `CardView`), но остаются в `activeVotes`.
+ * - R7: `trash` и `actions` отсортированы по `id`.
+ */
+export function materialize(_state: State): View {
+  throw new Error("materialize: not implemented");
 }
