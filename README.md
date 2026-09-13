@@ -27,9 +27,15 @@ npm run dev:server   # в отдельном терминале: npm run dev:web
 npm run check
 ```
 
-Одна команда: форматирование и линт (Biome), типы (`tsc -b`), тесты (Vitest
-по всем workspace-пакетам). Красный прогон — работа не считается готовой
-(см. `CLAUDE.md`, правило 2).
+Одна команда: форматирование и линт (Biome), типы (`tsc -b`), трассируемость
+требований (`check:trace`: каждое REQ из `docs/spec/requirements.md` входит в
+задачу `docs/tasks.md`, у выполненных задач есть тесты с ID требования), тесты
+(Vitest по всем workspace-пакетам, включая property-тесты fast-check в
+`packages/crdt`). Красный прогон — работа не считается готовой (см. `CLAUDE.md`,
+правило 2).
+
+Спецификация: `docs/brief.md` → `docs/spec/requirements.md` →
+`docs/spec/consistency-model.md` и `docs/spec/protocol.md` → `docs/tasks.md`.
 
 ## Миграции базы данных
 

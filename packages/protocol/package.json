@@ -9,6 +9,7 @@
     "build": "tsc -b"
   },
   "dependencies": {
+    "@retro/crdt": "*",
     "zod": "4.6.3"
   }
 }

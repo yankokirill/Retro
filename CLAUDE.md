@@ -327,12 +327,12 @@ ADR — по шаблону `docs/adr/0000-template.md`, отдельный ск
 - [x] `README.md`: запуск с нуля проверен вручную (`npm install` → `docker compose up -d db` → `npm run db:migrate` → `npm run dev:server`/`dev:web`), `/healthz` и Vite отвечают 200
 
 ### Этап 1 — В2 «Намерение и спецификация» (неделя 4, 22.09)
-- [ ] `docs/brief.md`: для кого, проблема, сценарий ретро, что НЕ делаем, критерии успеха
+- [x] `docs/brief.md`: для кого, проблема, сценарий ретро, что НЕ делаем, критерии успеха
 - [x] `docs/spec/consistency-model.md` — точное определение «правка не теряется» и «одинаковое состояние» (инварианты I1–I6), таблица полей и политик разрешения конфликта (§ 1.4) — написано в предыдущей сессии
-- [ ] `docs/spec/requirements.md`: REQ с критериями приёмки (Given/When/Then)
-- [ ] `docs/spec/protocol.md` + zod-схемы в `packages/protocol`
-- [ ] скилл `spec-to-tasks` → `docs/tasks.md`
-- [ ] **одна задача сделана**: `packages/crdt` — MV-регистр + property-тесты полурешётки; зелёный прогон
+- [x] `docs/spec/requirements.md`: REQ с критериями приёмки (Given/When/Then) — REQ-001…027
+- [x] `docs/spec/protocol.md` + zod-схемы в `packages/protocol` (T-006)
+- [x] скилл `spec-to-tasks` → `docs/tasks.md` (23 задачи) + `npm run check:trace` (T-023)
+- [x] **одна задача сделана**: `packages/crdt` — MV-регистр + property-тесты полурешётки; зелёный прогон (T-001, 19 тестов от агента test-author)
 
 ### Этап 2 — В3 «Репозиторий готов для агента» (неделя 6, 06.10)
 - [ ] ADR-0001 монорепо и стек, ADR-0002 свой CRDT вместо Yjs, ADR-0003 state-based дельты, ADR-0004 семантика конфликтов текста, ADR-0005 журнал операций в Postgres

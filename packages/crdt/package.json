@@ -6,6 +6,11 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "scripts": {
-    "build": "tsc -b"
+    "build": "tsc -b",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "fast-check": "4.10.0",
+    "vitest": "5.0.0"
   }
 }
