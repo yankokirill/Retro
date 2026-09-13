@@ -32,8 +32,11 @@ const git = (...args) => {
   }
 };
 
+// (?=\s|$), не \b: иначе "merge" ловит и "merge-base"/"merge-tree" (plumbing,
+// read-only), "checkout" — "checkout-index". Дефис для \b — граница слова,
+// для нас нет: нужен явный пробел или конец строки после ключевого слова.
 const gitWrite =
-  /\bgit\s+(?:-C\s+\S+\s+)?(add|commit|push|merge|rebase|reset|checkout|switch|stash|tag|branch\s+-[dDmM])\b/;
+  /\bgit\s+(?:-C\s+\S+\s+)?(add|commit|push|merge|rebase|reset|checkout|switch|stash|tag|branch\s+-[dDmM])(?=\s|$)/;
 
 if (readonly) {
   if (gitWrite.test(cmd))
@@ -58,7 +61,7 @@ if (gitWrite.test(cmd)) {
 
   if (existsSync(path.join(root, ".claude", "protect-main"))) {
     const onMain = git("branch", "--show-current") === "main";
-    if (onMain && /\bgit\s+(commit|merge|rebase|reset)\b/.test(cmd)) {
+    if (onMain && /\bgit\s+(commit|merge|rebase|reset)(?=\s|$)/.test(cmd)) {
       deny("Коммиты в main запрещены: создайте ветку feat/REQ-XXX-... и откройте PR.");
     }
     const pushMatch = cmd.match(/\bgit\s+push\b(.*)$/);
