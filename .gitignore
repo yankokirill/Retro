@@ -10,3 +10,4 @@ coverage/
 .turbo/
 *.tsbuildinfo
 .vite/
+.claude/scheduled_tasks.lock
