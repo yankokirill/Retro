@@ -9,6 +9,7 @@ import type {
   Color,
   Column,
   Created,
+  Delta,
   Dot,
   EntityId,
   Entry,
@@ -18,7 +19,9 @@ import type {
   Stamp,
   State,
   Supersede,
+  UserId,
   Value,
+  Vote,
 } from "./types.js";
 
 export type * from "./types.js";
@@ -241,7 +244,107 @@ export function editText(state: State, clock: Clock, id: EntityId, text: string)
   return setField(state, clock, { entity: id, field: "text" }, text);
 }
 
-/** move(id, place) = setField({entity: id, field: "place"}, place). */
+/** move(id, place) = setField({entity: id, field: "place"}, place). Обслуживает и moveGroup — поле одно и то же для любого Kind. */
 export function move(state: State, clock: Clock, id: EntityId, place: Place): OpResult {
   return setField(state, clock, { entity: id, field: "place" }, place);
+}
+
+const notImplemented = (name: string): never => {
+  throw new Error(`@retro/crdt: ${name} is not implemented yet`);
+};
+
+/** setColor(id, c) = setField({entity: id, field: "color"}, c). */
+export function setColor(_state: State, _clock: Clock, _id: EntityId, _color: Color): OpResult {
+  return notImplemented("setColor");
+}
+
+/** setGroup(id, g): g = null означает «нет группы» (∅ из § 3.1). */
+export function setGroup(
+  _state: State,
+  _clock: Clock,
+  _id: EntityId,
+  _group: EntityId | null,
+): OpResult {
+  return notImplemented("setGroup");
+}
+
+/**
+ * delete(id)/restore(id) — один генерик на все виды сущностей (§ 3.1: этот же
+ * примитив обслуживает deleteGroup/restoreGroup и deleteAction — поле `deleted`
+ * устроено одинаково для sticker/group/action).
+ */
+export function deleteEntity(_state: State, _clock: Clock, _id: EntityId): OpResult {
+  return notImplemented("deleteEntity");
+}
+export function restoreEntity(_state: State, _clock: Clock, _id: EntityId): OpResult {
+  return notImplemented("restoreEntity");
+}
+
+/**
+ * createGroup: C = {(id, group)}; записи title, place, deleted=false —
+ * без text/color/group, в отличие от createSticker (§ 3.1).
+ */
+export function createGroup(
+  _state: State,
+  _clock: Clock,
+  _params: { column: Column; frac: string; title: string },
+): OpResult {
+  return notImplemented("createGroup");
+}
+
+/** renameGroup(id, title) = setField({entity: id, field: "title"}, title). Политика «все варианты» — как у text. */
+export function renameGroup(_state: State, _clock: Clock, _id: EntityId, _title: string): OpResult {
+  return notImplemented("renameGroup");
+}
+
+/**
+ * createAction: C = {(id, action)}; записи text, assignee=null, done=false,
+ * deleted=false (§ 3.1). REQ-019 отказывается от восстановления в UI/протоколе,
+ * но на уровне CRDT это то же поле `deleted`, что и у стикера/группы —
+ * отдельного примитива «необратимое удаление» в этом пакете нет.
+ */
+export function createAction(_state: State, _clock: Clock, _params: { text: string }): OpResult {
+  return notImplemented("createAction");
+}
+
+/** assign(id, guestId) = setField({entity: id, field: "assignee"}, guestId). null — нет ответственного. */
+export function assign(
+  _state: State,
+  _clock: Clock,
+  _id: EntityId,
+  _guestId: string | null,
+): OpResult {
+  return notImplemented("assign");
+}
+
+/** setDone(id, done) = setField({entity: id, field: "done"}, done). */
+export function setDone(_state: State, _clock: Clock, _id: EntityId, _done: boolean): OpResult {
+  return notImplemented("setDone");
+}
+
+/**
+ * vote(target, user): V⁺ = {(d, user, target)} (§ 3.1). `user` — обезличенный
+ * voterToken (docs/spec/protocol.md § 2), не guestId — анонимность голосов
+ * (REQ-015, кр. 5) обеспечивается на уровне того, что кладут в это поле, а не
+ * здесь. Тратит dot из `clock`, но не пишет в E — голос не является записью
+ * ячейки, поэтому не участвует в vis/win/values.
+ */
+export function vote(_state: State, _clock: Clock, _target: EntityId, _user: UserId): OpResult {
+  return notImplemented("vote");
+}
+
+/**
+ * unvote(vd, target): V⁻ = {(vd, target)} (§ 3.1). `vd` — dot ОТЗЫВАЕМОГО
+ * голоса (элемент V⁺), а не новый dot этой операции: 2P-set идемпотентен по
+ * самому факту членства (vd, target) ∈ V⁻, поэтому отдельного тика часов не
+ * требует и `clock` не принимает и не возвращает — только `state`.
+ * Проверка «это мой голос» (V7, not_own_vote) — забота сервера, не CRDT.
+ */
+export function unvote(_state: State, _voteDot: Dot, _target: EntityId): Delta {
+  return notImplemented("unvote");
+}
+
+/** Голоса участника, ещё не отозванные: active(X) из § 2. */
+export function activeVotes(_state: State, _target?: EntityId): Vote[] {
+  return notImplemented("activeVotes");
 }
