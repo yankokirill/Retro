@@ -14,11 +14,13 @@ import type {
   EntityId,
   Entry,
   Key,
+  Kind,
   OpResult,
   Place,
   Stamp,
   State,
   Supersede,
+  Unvote,
   UserId,
   Value,
   Vote,
@@ -206,30 +208,26 @@ export function setField(state: State, clock: Clock, key: Key, value: Value): Op
 }
 
 /**
- * createSticker: C = {(id, sticker)}, id = dotKey(dot); записи text, color, place,
- * group = null, deleted = false — все с dot операции, без перекрытий.
+ * Общий конструктор создания сущности (§ 3.1): C = {(id, kind)}, id = dotKey(dot);
+ * перечисленные поля получают записи с тем же dot, без перекрытий (сущность новая).
+ * Используется createSticker/createGroup/createAction — они отличаются только
+ * набором начальных полей.
  */
-export function createSticker(
+function createEntity(
   state: State,
   clock: Clock,
-  params: { column: Column; frac: string; text: string; color: Color },
+  kind: Kind,
+  fields: readonly (readonly [Key["field"], Value])[],
 ): OpResult {
   const next = tick(state, clock);
   const id = dotKey(next.dot);
-  const created: Created = { id, kind: "sticker" };
-  const initial: [Key["field"], Value][] = [
-    ["text", params.text],
-    ["color", params.color],
-    ["place", { column: params.column, frac: params.frac }],
-    ["group", null],
-    ["deleted", false],
-  ];
+  const created: Created = { id, kind };
   return {
     delta: {
       ...EMPTY,
       created: new Map([[identity(id), created]]),
       entries: new Map(
-        initial.map(([field, value]) =>
+        fields.map(([field, value]) =>
           entryElement({ key: { entity: id, field }, dot: next.dot, stamp: next.stamp, value }),
         ),
       ),
@@ -237,6 +235,21 @@ export function createSticker(
     clock: next.clock,
     dot: next.dot,
   };
+}
+
+/** createSticker: text, color, place, group = null, deleted = false (§ 3.1). */
+export function createSticker(
+  state: State,
+  clock: Clock,
+  params: { column: Column; frac: string; text: string; color: Color },
+): OpResult {
+  return createEntity(state, clock, "sticker", [
+    ["text", params.text],
+    ["color", params.color],
+    ["place", { column: params.column, frac: params.frac }],
+    ["group", null],
+    ["deleted", false],
+  ]);
 }
 
 /** editText(id, text) = setField({entity: id, field: "text"}, text). */
@@ -249,23 +262,19 @@ export function move(state: State, clock: Clock, id: EntityId, place: Place): Op
   return setField(state, clock, { entity: id, field: "place" }, place);
 }
 
-const notImplemented = (name: string): never => {
-  throw new Error(`@retro/crdt: ${name} is not implemented yet`);
-};
-
 /** setColor(id, c) = setField({entity: id, field: "color"}, c). */
-export function setColor(_state: State, _clock: Clock, _id: EntityId, _color: Color): OpResult {
-  return notImplemented("setColor");
+export function setColor(state: State, clock: Clock, id: EntityId, color: Color): OpResult {
+  return setField(state, clock, { entity: id, field: "color" }, color);
 }
 
 /** setGroup(id, g): g = null означает «нет группы» (∅ из § 3.1). */
 export function setGroup(
-  _state: State,
-  _clock: Clock,
-  _id: EntityId,
-  _group: EntityId | null,
+  state: State,
+  clock: Clock,
+  id: EntityId,
+  group: EntityId | null,
 ): OpResult {
-  return notImplemented("setGroup");
+  return setField(state, clock, { entity: id, field: "group" }, group);
 }
 
 /**
@@ -273,64 +282,72 @@ export function setGroup(
  * примитив обслуживает deleteGroup/restoreGroup и deleteAction — поле `deleted`
  * устроено одинаково для sticker/group/action).
  */
-export function deleteEntity(_state: State, _clock: Clock, _id: EntityId): OpResult {
-  return notImplemented("deleteEntity");
+export function deleteEntity(state: State, clock: Clock, id: EntityId): OpResult {
+  return setField(state, clock, { entity: id, field: "deleted" }, true);
 }
-export function restoreEntity(_state: State, _clock: Clock, _id: EntityId): OpResult {
-  return notImplemented("restoreEntity");
+export function restoreEntity(state: State, clock: Clock, id: EntityId): OpResult {
+  return setField(state, clock, { entity: id, field: "deleted" }, false);
 }
 
-/**
- * createGroup: C = {(id, group)}; записи title, place, deleted=false —
- * без text/color/group, в отличие от createSticker (§ 3.1).
- */
+/** createGroup: title, place, deleted=false — без text/color/group (§ 3.1). */
 export function createGroup(
-  _state: State,
-  _clock: Clock,
-  _params: { column: Column; frac: string; title: string },
+  state: State,
+  clock: Clock,
+  params: { column: Column; frac: string; title: string },
 ): OpResult {
-  return notImplemented("createGroup");
+  return createEntity(state, clock, "group", [
+    ["title", params.title],
+    ["place", { column: params.column, frac: params.frac }],
+    ["deleted", false],
+  ]);
 }
 
 /** renameGroup(id, title) = setField({entity: id, field: "title"}, title). Политика «все варианты» — как у text. */
-export function renameGroup(_state: State, _clock: Clock, _id: EntityId, _title: string): OpResult {
-  return notImplemented("renameGroup");
+export function renameGroup(state: State, clock: Clock, id: EntityId, title: string): OpResult {
+  return setField(state, clock, { entity: id, field: "title" }, title);
 }
 
 /**
- * createAction: C = {(id, action)}; записи text, assignee=null, done=false,
- * deleted=false (§ 3.1). REQ-019 отказывается от восстановления в UI/протоколе,
- * но на уровне CRDT это то же поле `deleted`, что и у стикера/группы —
- * отдельного примитива «необратимое удаление» в этом пакете нет.
+ * createAction: text, assignee=null, done=false, deleted=false (§ 3.1).
+ * REQ-019 отказывается от восстановления в UI/протоколе, но на уровне CRDT
+ * это то же поле `deleted`, что и у стикера/группы — отдельного примитива
+ * «необратимое удаление» в этом пакете нет.
  */
-export function createAction(_state: State, _clock: Clock, _params: { text: string }): OpResult {
-  return notImplemented("createAction");
+export function createAction(state: State, clock: Clock, params: { text: string }): OpResult {
+  return createEntity(state, clock, "action", [
+    ["text", params.text],
+    ["assignee", null],
+    ["done", false],
+    ["deleted", false],
+  ]);
 }
 
 /** assign(id, guestId) = setField({entity: id, field: "assignee"}, guestId). null — нет ответственного. */
-export function assign(
-  _state: State,
-  _clock: Clock,
-  _id: EntityId,
-  _guestId: string | null,
-): OpResult {
-  return notImplemented("assign");
+export function assign(state: State, clock: Clock, id: EntityId, guestId: string | null): OpResult {
+  return setField(state, clock, { entity: id, field: "assignee" }, guestId);
 }
 
 /** setDone(id, done) = setField({entity: id, field: "done"}, done). */
-export function setDone(_state: State, _clock: Clock, _id: EntityId, _done: boolean): OpResult {
-  return notImplemented("setDone");
+export function setDone(state: State, clock: Clock, id: EntityId, done: boolean): OpResult {
+  return setField(state, clock, { entity: id, field: "done" }, done);
 }
 
 /**
  * vote(target, user): V⁺ = {(d, user, target)} (§ 3.1). `user` — обезличенный
  * voterToken (docs/spec/protocol.md § 2), не guestId — анонимность голосов
  * (REQ-015, кр. 5) обеспечивается на уровне того, что кладут в это поле, а не
- * здесь. Тратит dot из `clock`, но не пишет в E — голос не является записью
- * ячейки, поэтому не участвует в vis/win/values.
+ * здесь. Тратит dot и лемпорт-метку из `clock`, как и любая другая операция
+ * актора, но не пишет в E — голос не является записью ячейки, поэтому не
+ * участвует в vis/win/values (у Vote нет Stamp, § 1.4 типов).
  */
-export function vote(_state: State, _clock: Clock, _target: EntityId, _user: UserId): OpResult {
-  return notImplemented("vote");
+export function vote(state: State, clock: Clock, target: EntityId, user: UserId): OpResult {
+  const next = tick(state, clock);
+  const entry: Vote = { dot: next.dot, user, target };
+  return {
+    delta: { ...EMPTY, votes: new Map([[identity(next.dot.actor, next.dot.counter), entry]]) },
+    clock: next.clock,
+    dot: next.dot,
+  };
 }
 
 /**
@@ -340,11 +357,21 @@ export function vote(_state: State, _clock: Clock, _target: EntityId, _user: Use
  * требует и `clock` не принимает и не возвращает — только `state`.
  * Проверка «это мой голос» (V7, not_own_vote) — забота сервера, не CRDT.
  */
-export function unvote(_state: State, _voteDot: Dot, _target: EntityId): Delta {
-  return notImplemented("unvote");
+export function unvote(_state: State, voteDot: Dot, target: EntityId): Delta {
+  const entry: Unvote = { dot: voteDot, target };
+  return {
+    ...EMPTY,
+    unvotes: new Map([[identity(voteDot.actor, voteDot.counter, target), entry]]),
+  };
 }
 
 /** Голоса участника, ещё не отозванные: active(X) из § 2. */
-export function activeVotes(_state: State, _target?: EntityId): Vote[] {
-  return notImplemented("activeVotes");
+export function activeVotes(state: State, target?: EntityId): Vote[] {
+  const result: Vote[] = [];
+  for (const entry of state.votes.values()) {
+    if (target !== undefined && entry.target !== target) continue;
+    if (state.unvotes.has(identity(entry.dot.actor, entry.dot.counter, entry.target))) continue;
+    result.push(entry);
+  }
+  return result;
 }

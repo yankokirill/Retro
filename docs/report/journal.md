@@ -110,3 +110,27 @@
 - **Проверено:** `npm run check` целиком зелёный (Biome, `tsc -b` + типы тестов CRDT, `check:trace` с тремя `done`-задачами, Vitest: server 2/2, crdt 19/19)
 - **Открыто:** `npm audit` — те же 4 moderate через `drizzle-kit`; хуки агентов не проверены вживую (отложено до сессии, где `.claude/agents` зарегистрированы харнессом). Следующая веха — В3
 - **Цена:** test-author ≈ 300 тыс. токенов за два прогона; главная сессия не измерялась
+
+## 2026-09-13 — Этап 2 / В3: ADR, архитектура, branch protection, T-002 — и инцидент с гонкой веток
+
+- **PR / коммиты:** `f4b5343` на `main` (ADR-0001…0005, architecture.md, PR-шаблон, branch-protection.md). Дальше — три отдельные ветки, ещё не запушены: `feat/T-002-remaining-crdt-ops` (стабы + реализация T-002), `chore/enable-protect-main` (файл `.claude/protect-main`). PR открываются вручную через compare-ссылку — `gh` в среде нет
+- **Модели:** Sonnet 5 — главная сессия и обе реализации; Sonnet 5 — агент test-author, дважды (T-001 в прошлой записи, T-002 в этой)
+- **Скиллы:** `spec-to-tasks`/`implement-req`/`crdt-op` вручную, как и раньше
+- **Агенты:** `test-author` — T-002, general-purpose с тем же ограничением по хукам
+- **MCP:** не использовались
+- **Что сделано (репозиторий готов для агента, В3):**
+  - ADR-0001…0005, `docs/architecture.md` (C4 context+container, mermaid), `.github/pull_request_template.md`
+  - `.claude/protect-main` — включает уже существовавшую с В1 защиту в `guard-bash.mjs` (прямые commit/merge/rebase/reset/push на `main` из-под агента запрещены)
+  - branch protection на GitHub — настроил пользователь вручную по `docs/ops/branch-protection.md` после того, как выяснилось, что в среде нет `gh`/токена для API. Проверено безопасно, без пуша: `curl https://api.github.com/repos/.../branches/main` (публичный, без токена) → `protected: true`. Файл `docs/ops/branch-protection.md` после этого удалён по просьбе пользователя — задача выполнена, инструкция больше не нужна
+  - T-002 (`packages/crdt`): setColor, setGroup, deleteEntity/restoreEntity (один генерик на sticker/group/action), createGroup, renameGroup, createAction, assign, setDone, vote, unvote, activeVotes. Вынесен общий `createEntity` — createSticker/createGroup/createAction теперь его тонкие обёртки (рефактор T-001 без изменения наблюдаемого поведения — 7 тестов T-001 остались зелёными). 42/42 теста
+- **Инцидент — гонка между git-веткой и фоновым агентом (важно на будущее):**
+  - фоновые агенты (`Agent` tool, `general-purpose`) делят с главной сессией один и тот же рабочий каталог — не отдельный `git worktree`. Пока агент test-author писал в `packages/crdt/test/`, главная сессия параллельно переключала ветки (`git switch`) для не связанной с T-002 задачи (включение `protect-main`). В результате: (а) агент, читая `src/index.ts` в момент, когда был выбран `main` вместо `feat/T-002-remaining-crdt-ops`, не увидел там стабов T-002 (они существовали только на ветке) и корректно, прозрачно сообщил об этом расхождении, обойдя его типизированным мостом `pendingOps` — это не ошибка агента, а адекватная реакция на реальную (хоть и вызванную мной) нестыковку; (б) отдельно и необъяснимо до конца — рабочее дерево `main` разошлось с `origin/main`: пропал `docs/ops/branch-protection.md`, в `CLAUDE.md` строка про branch protection стала «выполнено» без моего осознанного редактирования. Точную causal-цепочку для (б) восстановить не смог — фигурирует та же гонка веток/агента, но конкретный механизм (какая именно операция стёрла файл и переписала строку) не установлен
+  - реакция: НЕ выполнил предложенный `git reset --hard origin/main`, пока агент не завершился (`ListAgents` показывал `running`) — иначе уничтожил бы его ещё не закоммиченную работу. Сначала скопировал ценные файлы (`journal.md`, `arbitraries.ts`, новые тесты) во внешний scratchpad, дождался статуса `completed`, и только тогда сделал reset. После reset вручную перенёс тесты на `feat/T-002-remaining-crdt-ops` и продолжил
+  - **вывод на будущее:** не переключать git-ветки в общем рабочем каталоге, пока в нём активен фоновый агент — ждать его завершения, либо (если появится) использовать `isolation: "worktree"` для параллельной работы
+- **Руками:** пользователь настроил branch protection на GitHub (я не мог — нет `gh`/токена); пользователь подтвердил `git reset --hard origin/main` и попросил поправить `CLAUDE.md`/удалить `docs/ops/branch-protection.md` самостоятельно
+- **Проверено:** `npm run check` зелёный на `feat/T-002-remaining-crdt-ops` (Biome, `tsc -b` + тесты CRDT, `check:trace` — 10 REQ с тестами, Vitest: server 2/2, crdt 42/42); branch protection подтверждён публичным API-запросом, без деструктивных действий
+- **Открыто:**
+  - `required_status_checks.contexts` в ответе API — пустой список: CI-чек `check` пока не отмечен обязательным в правиле защиты; стоит перепроверить в GitHub UI
+  - обе ветки (`feat/T-002-remaining-crdt-ops`, `chore/enable-protect-main`) не запушены и не оформлены в PR — следующий шаг
+  - `npm audit`: те же 4 moderate через `drizzle-kit`
+- **Цена:** test-author (T-002) ≈ 211 тыс. токенов, 64 вызова инструментов, ~15 минут
