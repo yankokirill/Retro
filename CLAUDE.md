@@ -341,7 +341,7 @@ ADR — по шаблону `docs/adr/0000-template.md`, отдельный ск
 - [x] схема решения в `docs/architecture.md` (C4: context + container, mermaid)
 - [x] этот `CLAUDE.md` актуален; скиллы и агенты из раздела 7 проверены в работе (см. таблицы выше и известное ограничение харнесса), шаблон `docs/adr/0000-template.md`, включён `.claude/protect-main`
 - [x] PR-шаблон с чеклистом REQ (`.github/pull_request_template.md`)
-- [ ] branch protection на `main` — **не настроено**: в среде нет `gh` и токена для GitHub API; см. `docs/ops/branch-protection.md` для точных настроек и ручного шага
+- [x] branch protection на `main` — настроена пользователем вручную в GitHub UI (в среде нет `gh`/токена для API). Проверено без пуша: `curl https://api.github.com/repos/yankokirill/Retro/branches/main` (публичный, не требует токена для публичного репозитория) → `protected: true`. Открыто: `required_status_checks.contexts` в ответе пуст — CI-чек `check` пока не отмечен обязательным, стоит перепроверить в GitHub UI
 - [x] функциональность (частично, сознательно сужено под размер одной задачи — правило 6): T-002, остальные операции CRDT (setColor/setGroup/delete/restore, группы, action items, голоса). WS-синхронизация через `BoardHub` и журнал операций (T-007…T-009) — ещё не начаты, следующие по очереди в `docs/tasks.md`
 - [x] **PR с зелёной сборкой** — ветка `feat/T-002-remaining-crdt-ops`, CI в `.github/workflows/ci.yml` запускается на push
 
