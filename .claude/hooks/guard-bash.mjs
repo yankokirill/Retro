@@ -61,8 +61,21 @@ if (gitWrite.test(cmd)) {
     if (onMain && /\bgit\s+(commit|merge|rebase|reset)\b/.test(cmd)) {
       deny("Коммиты в main запрещены: создайте ветку feat/REQ-XXX-... и откройте PR.");
     }
-    if (/\bgit\s+push\b/.test(cmd) && (onMain || /[\s:]main(\s|$)/.test(cmd))) {
-      deny("Push в main запрещён: изменения попадают в main только через PR.");
+    const pushMatch = cmd.match(/\bgit\s+push\b(.*)$/);
+    if (pushMatch) {
+      // Разбор refspec-ов: интересует только то, что реально целится в main —
+      // `git push origin --delete other-branch` не должен блокироваться только
+      // из-за того, что сейчас выбран main.
+      const args = pushMatch[1].trim().split(/\s+/).filter(Boolean);
+      const refspecs = args.filter((a) => !a.startsWith("-") && a !== "origin" && a !== "upstream");
+      const targetsMain = (ref) => {
+        const target = ref.includes(":") ? ref.split(":").pop() : ref;
+        return target === "main" || target === "refs/heads/main";
+      };
+      const bare = refspecs.length === 0; // `git push`/`git push origin` без refspec — пушит текущую ветку
+      if ((bare && onMain) || refspecs.some(targetsMain)) {
+        deny("Push в main запрещён: изменения попадают в main только через PR.");
+      }
     }
   }
 }
