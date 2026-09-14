@@ -111,6 +111,28 @@ export const ops = pgTable(
 );
 
 /**
+ * Автор сущности (T-011, REQ-006, REQ-007/REQ-009 «только свой стикер»).
+ * `protocol.md` § 2: «Автор хранится только на сервере, в CRDT его нет» —
+ * это и есть механизм. Заполняется один раз, когда принимается `create`
+ * (`ws/gateway.ts`, после успешного `appendOp`); сейчас только для
+ * стикеров (`kind === "sticker"`) — только они упомянуты в REQ-006/007/009,
+ * авторство групп/action item в T-011 не нужно и не пишется.
+ * `entityId` — `text`, не `uuid`: `EntityId = dotKey(dot)` = `"${actor}:${counter}"`,
+ * составная строка, как `ops.actor` (см. её же JSDoc).
+ */
+export const authors = pgTable(
+  "authors",
+  {
+    boardId: uuid("board_id")
+      .notNull()
+      .references(() => boards.id),
+    entityId: text("entity_id").notNull(),
+    guestId: uuid("guest_id").notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.boardId, table.entityId] })],
+);
+
+/**
  * Снапшоты (T-008, REQ-027; § 6 `consistency-model.md`). `state` —
  * `compact(X_S(uptoSeq))` в проводном формате. Несколько строк на доску
  * допустимы (история); действующий — с максимальным `uptoSeq`

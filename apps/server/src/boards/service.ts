@@ -3,7 +3,7 @@
 // `db/client.ts` — тестируемо без переменных окружения (Testcontainers
 // передаёт своё подключение).
 
-import type { Role } from "@retro/protocol";
+import type { Phase, Role } from "@retro/protocol";
 import { and, eq, isNull, or } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "../db/schema.js";
@@ -171,6 +171,58 @@ export async function getBoardForGuest(
     authors: {},
     role,
   };
+}
+
+/** Текущая фаза доски; `null` — доска не существует/удалена (T-011, V6). */
+export async function getBoardPhase(db: Db, boardId: string): Promise<string | null> {
+  const [board] = await db
+    .select({ phase: boards.phase })
+    .from(boards)
+    .where(and(eq(boards.id, boardId), isNull(boards.deletedAt)));
+  return board?.phase ?? null;
+}
+
+export type SetPhaseResult = "ok" | "forbidden" | "irreversible_phase" | "not_found";
+
+export interface SetPhaseParams {
+  readonly boardId: string;
+  readonly guestId: string;
+  readonly phase: Phase;
+}
+
+/**
+ * REQ-004 (кр. 2, 4). Роль проверяется здесь же (не через `ops/permissions.ts`
+ * — та про CRDT-операции над стикерами/action item, `setPhase` — метаданные
+ * доски, ближе по духу к `grantFacilitator` выше). `irreversible_phase`
+ * (кр. 2): доска уже покидала `collect`, если её текущая фаза — не `collect`;
+ * отдельного флага «уже раскрыта» не нужно — вернуться в `collect` можно
+ * только из него самого, значит текущая фаза сама по себе доказывает факт
+ * ухода (по индукции: если бы уход был возможен, эта же проверка отклонила
+ * бы более раннюю попытку).
+ */
+export async function setPhase(db: Db, params: SetPhaseParams): Promise<SetPhaseResult> {
+  const [board] = await db
+    .select({ ownerId: boards.ownerId, phase: boards.phase })
+    .from(boards)
+    .where(and(eq(boards.id, params.boardId), isNull(boards.deletedAt)));
+  if (!board) return "not_found";
+
+  let role: Role;
+  if (board.ownerId === params.guestId) {
+    role = "owner";
+  } else {
+    const [member] = await db
+      .select({ role: members.role })
+      .from(members)
+      .where(and(eq(members.boardId, params.boardId), eq(members.userId, params.guestId)));
+    if (!member) return "not_found";
+    role = member.role as Role;
+  }
+  if (role !== "owner" && role !== "facilitator") return "forbidden";
+  if (board.phase !== "collect" && params.phase === "collect") return "irreversible_phase";
+
+  await db.update(boards).set({ phase: params.phase }).where(eq(boards.id, params.boardId));
+  return "ok";
 }
 
 export type GrantFacilitatorResult = "ok" | "not_owner" | "target_not_member";
