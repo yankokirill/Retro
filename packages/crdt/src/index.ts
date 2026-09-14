@@ -29,6 +29,7 @@ import type {
   Value,
   View,
   Vote,
+  WireDelta,
 } from "./types.js";
 
 export type * from "./types.js";
@@ -545,4 +546,37 @@ export function materialize(state: State): View {
   actions.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 
   return { columns, trash, actions };
+}
+
+/**
+ * compact(X) — § 6: выбрасывает из `state` только перекрытые записи (те, чей
+ * `(key, dot)` уже встречается в `supersedes`) и отозванные голоса (те, чей
+ * `(dot, target)` уже встречается в `unvotes`). `created`, `supersedes`,
+ * `unvotes` не меняются — они маленькие (пары идентификаторов) и нужны,
+ * чтобы поздно пришедшая старая запись/голос всё равно остались невидимы.
+ *
+ * I4 (§ 8): для любого достижимого `state` и любого `y`,
+ * `materialize(compact(state) ⊔ y) = materialize(state ⊔ y)`.
+ */
+export function compact(_state: State): State {
+  throw new Error("compact: not implemented");
+}
+
+/**
+ * toWire(X): `State` (пять `Map`) → `WireDelta` (пять массивов, порядок не
+ * значим) — проводной формат из `packages/protocol` (`wireDeltaSchema`).
+ * Чистая проекция значений `Map`, без изменения их состава.
+ */
+export function toWire(_state: State): WireDelta {
+  throw new Error("toWire: not implemented");
+}
+
+/**
+ * fromWire(w): обратное `toWire` — `WireDelta` → `State`. Для любого
+ * достижимого `state`, `equals(fromWire(toWire(state)), state)` (сравнение
+ * как множеств, не порядка) — `toWire`/`fromWire` не теряют и не добавляют
+ * элементы.
+ */
+export function fromWire(_wire: WireDelta): State {
+  throw new Error("fromWire: not implemented");
 }
