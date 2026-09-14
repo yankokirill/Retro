@@ -347,7 +347,9 @@ describe("R3/R4: эффективная группа стикера", () => {
     state = merge(state, ungroup.delta);
 
     const view = materialize(state);
-    expect(view.columns.get("start") ?? []).toEqual([]);
+    expect(view.columns.get("start")).toEqual([
+      { id: groupId, title: ["G"], conflict: false, cards: [], votes: 0 },
+    ]);
     expect(view.columns.get("stop")).toEqual([
       { id: stickerId, text: ["A"], conflict: false, color: "yellow", votes: 0 },
     ]);
