@@ -1,0 +1,1 @@
+ALTER TABLE "boards" ALTER COLUMN "settings" SET DEFAULT '{"voteLimit":3}'::jsonb;

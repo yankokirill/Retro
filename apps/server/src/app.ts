@@ -1,9 +1,12 @@
 import {
+  boardIdSchema,
   createBoardRequestSchema,
   displayNameSchema,
   type ErrorResponse,
   GUEST_ID_HEADER,
+  guestIdSchema,
   LIMITS,
+  linkTokenSchema,
 } from "@retro/protocol";
 import Fastify, { type FastifyInstance } from "fastify";
 import type { Db } from "./boards/service.js";
@@ -18,11 +21,16 @@ function requireDb(db: Db | undefined): Db {
   return db;
 }
 
+const INVALID_SHAPE = (message: string): ErrorResponse => ({ error: "invalid_shape", message });
+
+/** `undefined` — заголовок отсутствует или не UUID (docs/spec/protocol.md § 2). */
 function requireGuestId(
   headers: Record<string, string | string[] | undefined>,
 ): string | undefined {
   const value = headers[GUEST_ID_HEADER];
-  return typeof value === "string" ? value : undefined;
+  if (typeof value !== "string") return undefined;
+  const parsed = guestIdSchema.safeParse(value);
+  return parsed.success ? parsed.data : undefined;
 }
 
 /**
@@ -75,18 +83,20 @@ export function buildApp(deps: AppDeps = {}): FastifyInstance {
         const body: ErrorResponse = { error: "missing_guest_id", message: "X-Guest-Id required" };
         return reply.code(400).send(body);
       }
+      const linkToken = linkTokenSchema.safeParse(request.params.linkToken);
+      if (!linkToken.success) {
+        return reply.code(400).send(INVALID_SHAPE("linkToken must be a UUID"));
+      }
       // Обязательный query-параметр (у GET нет тела); используется только при
       // первом заходе, на повторном — функционально игнорируется (protocol.md § 7).
       const displayName = displayNameSchema.safeParse(request.query.displayName);
       if (!displayName.success) {
-        const body: ErrorResponse = {
-          error: "invalid_shape",
-          message: "displayName query param required and must be 1-50 chars",
-        };
-        return reply.code(400).send(body);
+        return reply
+          .code(400)
+          .send(INVALID_SHAPE("displayName query param required and must be 1-50 chars"));
       }
       const result = await boardsService.joinByLink(requireDb(deps.db), {
-        linkToken: request.params.linkToken,
+        linkToken: linkToken.data,
         guestId,
         displayName: displayName.data,
       });
@@ -104,8 +114,12 @@ export function buildApp(deps: AppDeps = {}): FastifyInstance {
       const body: ErrorResponse = { error: "missing_guest_id", message: "X-Guest-Id required" };
       return reply.code(400).send(body);
     }
+    const boardId = boardIdSchema.safeParse(request.params.boardId);
+    if (!boardId.success) {
+      return reply.code(400).send(INVALID_SHAPE("boardId must be a UUID"));
+    }
     const result = await boardsService.getBoardForGuest(requireDb(deps.db), {
-      boardId: request.params.boardId,
+      boardId: boardId.data,
       guestId,
     });
     if (!result) {

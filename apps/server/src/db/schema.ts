@@ -10,12 +10,18 @@ import { jsonb, pgTable, primaryKey, text, timestamp, uuid } from "drizzle-orm/p
  * вместе с журналом операций и CRDT-инвариантами
  * (docs/spec/consistency-model.md, CLAUDE.md § 3 «Хранилище»).
  */
+export interface BoardSettings {
+  readonly voteLimit: number;
+}
+
 export const boards = pgTable("boards", {
   id: uuid("id").primaryKey().defaultRandom(),
   title: text("title").notNull(),
   template: text("template").notNull().default("start-stop-continue"),
   phase: text("phase").notNull().default("collect"),
-  settings: jsonb("settings").notNull().default({}),
+  // voteLimit всегда явно задан вызывающим (boards/service.ts createBoard),
+  // значение по умолчанию здесь — только чтобы колонка была NOT NULL корректно.
+  settings: jsonb("settings").$type<BoardSettings>().notNull().default({ voteLimit: 3 }),
   ownerId: uuid("owner_id").notNull(),
   participantLinkToken: uuid("participant_link_token").notNull().defaultRandom().unique(),
   viewerLinkToken: uuid("viewer_link_token").notNull().defaultRandom().unique(),
