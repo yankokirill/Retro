@@ -273,6 +273,129 @@ describe("REQ-002: hello постороннего guestId отклоняется
 // операция не должна портить остальную сессию соединения (REQ-024 кр. 1).
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// T-011 — REQ-004: команда `setPhase` по реальному WS-соединению.
+// Контракт `command`/`commandResult`/`meta` — docs/spec/protocol.md § 4–5;
+// необратимость `collect` и матрица роль/фаза — docs/security/permissions.md.
+// `apps/server/src/boards/service.ts` (кроме сигнатур `createBoard`/
+// `joinByLink`, уже используемых выше в этом файле) не читался — только
+// протокол определяет ожидаемые reason/ok здесь.
+// ---------------------------------------------------------------------------
+
+describe("REQ-004: смена фазы доски через WS-команду setPhase", () => {
+  it("REQ-004 кр.1/кр.3: owner может переключить фазу из collect на group — commandResult ok, всем рассылается meta с новой фазой", async () => {
+    const { boardId, ownerId } = await newBoardWithOwner();
+    const ws = await connect(boardId);
+    const reader = messageReader(ws);
+
+    sendHello(ws, { guestId: ownerId, displayName: "Owner", actorId: newActorId() });
+    const welcome = await reader.next();
+    expect(welcome.type).toBe("welcome");
+
+    ws.send(
+      JSON.stringify({
+        type: "command",
+        id: "cmd-1",
+        command: { type: "setPhase", phase: "group" },
+      }),
+    );
+
+    // commandResult и meta оба приходят автору; порядок между ними протоколом
+    // не гарантирован (§ 5 не фиксирует последовательность двух разных типов
+    // сообщений), поэтому читаем оба следующих сообщения и сортируем по типу.
+    const first = await reader.next();
+    const second = await reader.next();
+    const commandResult = [first, second].find((msg) => msg.type === "commandResult");
+    const meta = [first, second].find((msg) => msg.type === "meta");
+
+    expect(commandResult?.type).toBe("commandResult");
+    if (commandResult?.type !== "commandResult") throw new Error("expected commandResult");
+    expect(commandResult.id).toBe("cmd-1");
+    expect(commandResult.ok).toBe(true);
+
+    expect(meta?.type).toBe("meta");
+    if (meta?.type !== "meta") throw new Error("expected meta broadcast");
+    expect(meta.meta.phase).toBe("group");
+
+    ws.close();
+  });
+
+  it("REQ-004 кр.2: попытка вернуть фазу в collect после ухода из неё отклоняется как irreversible_phase", async () => {
+    const { boardId, ownerId } = await newBoardWithOwner();
+    const ws = await connect(boardId);
+    const reader = messageReader(ws);
+
+    sendHello(ws, { guestId: ownerId, displayName: "Owner", actorId: newActorId() });
+    const welcome = await reader.next();
+    expect(welcome.type).toBe("welcome");
+
+    // Уходим из collect один раз — доска теперь никогда не сможет туда вернуться.
+    ws.send(
+      JSON.stringify({
+        type: "command",
+        id: "cmd-leave-collect",
+        command: { type: "setPhase", phase: "group" },
+      }),
+    );
+    // Дренируем commandResult + meta от первого перехода, не полагаясь на порядок.
+    await reader.next();
+    await reader.next();
+
+    ws.send(
+      JSON.stringify({
+        type: "command",
+        id: "cmd-back-to-collect",
+        command: { type: "setPhase", phase: "collect" },
+      }),
+    );
+    const rejected = await reader.next();
+
+    expect(rejected.type).toBe("commandResult");
+    if (rejected.type !== "commandResult") throw new Error("expected commandResult");
+    expect(rejected.id).toBe("cmd-back-to-collect");
+    expect(rejected.ok).toBe(false);
+    expect(rejected.reason).toBe("irreversible_phase");
+
+    ws.close();
+  });
+
+  it("REQ-004 кр.4: participant не может сменить фазу доски — commandResult ok:false, reason forbidden", async () => {
+    const { boardId, participantLink } = await newBoardWithOwner();
+    const participantId = newGuestId();
+    const joined = await joinByLink(db, {
+      linkToken: participantLink,
+      guestId: participantId,
+      displayName: "Alice",
+    });
+    expect(joined?.role).toBe("participant");
+
+    const ws = await connect(boardId);
+    const reader = messageReader(ws);
+    sendHello(ws, { guestId: participantId, displayName: "Alice", actorId: newActorId() });
+    const welcome = await reader.next();
+    expect(welcome.type).toBe("welcome");
+    if (welcome.type !== "welcome") throw new Error("expected welcome");
+    expect(welcome.role).toBe("participant");
+
+    ws.send(
+      JSON.stringify({
+        type: "command",
+        id: "cmd-forbidden",
+        command: { type: "setPhase", phase: "group" },
+      }),
+    );
+    const result = await reader.next();
+
+    expect(result.type).toBe("commandResult");
+    if (result.type !== "commandResult") throw new Error("expected commandResult");
+    expect(result.id).toBe("cmd-forbidden");
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("forbidden");
+
+    ws.close();
+  });
+});
+
 describe("REQ-024: reject доходит до клиента по WS и не ломает соединение", () => {
   it("REQ-024: write в несуществующую сущность получает reject с reason unknown_target и тем же dot", async () => {
     const { boardId, ownerId } = await newBoardWithOwner();
