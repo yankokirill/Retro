@@ -24,7 +24,18 @@ export type StickerAction = "createSticker" | "createAction" | "editSticker" | "
  * у группы; `text` — и у стикера, и у action item (§ 1.4 `consistency-model.md`).
  */
 export function classifyAction(state: State, delta: WireDelta): StickerAction | null {
-  throw new Error("classifyAction: not implemented");
+  const [created] = delta.created;
+  if (created) {
+    if (created.kind === "sticker") return "createSticker";
+    if (created.kind === "action") return "createAction";
+    return null; // group
+  }
+  if (delta.votes.length > 0 || delta.unvotes.length > 0) return null;
+
+  const [entry] = delta.entries;
+  if (!entry) return null;
+  if (entityKind(state, entry.key.entity) !== "sticker") return null;
+  return entry.key.field === "group" ? "assignGroup" : "editSticker";
 }
 
 export interface CheckPermissionParams {
@@ -54,6 +65,37 @@ export type CheckPermissionResult =
  *    фазе) → `forbidden`;
  *  - `assignGroup`: фаза === `group`, владение не требуется (REQ-011).
  */
+function reject(reason: RejectReason, message: string): CheckPermissionResult {
+  return { ok: false, reason, message };
+}
+
 export function checkPermission(params: CheckPermissionParams): CheckPermissionResult {
-  throw new Error("checkPermission: not implemented");
+  const { role, phase, action, isOwn } = params;
+  if (role === "owner" || role === "facilitator") return { ok: true };
+  if (role === "viewer") return reject("forbidden", `viewer cannot perform ${action}`);
+
+  // role === "participant"
+  switch (action) {
+    case "createSticker":
+      if (phase !== "collect" && phase !== "group") {
+        return reject("wrong_phase", `createSticker not allowed in phase ${phase}`);
+      }
+      return { ok: true };
+    case "createAction":
+      if (phase !== "discuss" && phase !== "actions") {
+        return reject("wrong_phase", `createAction not allowed in phase ${phase}`);
+      }
+      return { ok: true };
+    case "editSticker":
+      if (phase !== "collect" && phase !== "group") {
+        return reject("wrong_phase", `editSticker not allowed in phase ${phase}`);
+      }
+      if (!isOwn) return reject("forbidden", "participant can only edit their own sticker");
+      return { ok: true };
+    case "assignGroup":
+      if (phase !== "group") {
+        return reject("wrong_phase", `assignGroup not allowed in phase ${phase}`);
+      }
+      return { ok: true };
+  }
 }
