@@ -1,3 +1,4 @@
+import websocketPlugin from "@fastify/websocket";
 import {
   boardIdSchema,
   createBoardRequestSchema,
@@ -11,9 +12,13 @@ import {
 import Fastify, { type FastifyInstance } from "fastify";
 import type { Db } from "./boards/service.js";
 import * as boardsService from "./boards/service.js";
+import { BoardHub } from "./ws/board-hub.js";
+import { registerBoardWebSocket } from "./ws/gateway.js";
 
 export interface AppDeps {
   readonly db?: Db;
+  /** `VOTER_TOKEN_SECRET` — обязателен вместе с `db`, чтобы поднять WS-маршрут (T-009). */
+  readonly voterTokenSecret?: string;
 }
 
 function requireDb(db: Db | undefined): Db {
@@ -42,6 +47,7 @@ function requireGuestId(
  */
 export function buildApp(deps: AppDeps = {}): FastifyInstance {
   const app = Fastify({ logger: true });
+  app.register(websocketPlugin);
 
   app.get("/healthz", async () => ({ status: "ok" }));
 
@@ -128,6 +134,17 @@ export function buildApp(deps: AppDeps = {}): FastifyInstance {
     }
     return reply.code(200).send(result);
   });
+
+  // T-009. Отдельный `if`, не `requireDb` — WS-маршрут не нужен тестам
+  // /healthz и /, которым БД не нужна вовсе (в отличие от REST-маршрутов
+  // досок, которые требуют БД безусловно).
+  if (deps.db && deps.voterTokenSecret) {
+    registerBoardWebSocket(app, {
+      db: deps.db,
+      hub: new BoardHub(),
+      voterTokenSecret: deps.voterTokenSecret,
+    });
+  }
 
   return app;
 }

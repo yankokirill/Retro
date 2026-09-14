@@ -149,3 +149,26 @@ export async function saveSnapshot(
 ): Promise<void> {
   await db.insert(snapshots).values({ boardId, uptoSeq, state: toWire(compactState(state)) });
 }
+
+export interface WelcomeData {
+  readonly snapshot: { readonly upToSeq: number; readonly state: WireDelta } | null;
+  readonly ops: OpRow[];
+}
+
+/**
+ * T-009, `welcome` при подключении (protocol.md § 6 «Подключение»): если
+ * `lastSeq` не задан или старше последнего снапшота — снапшот целиком плюс
+ * хвост журнала после него (`snapshot` непустой, если снапшот вообще
+ * существует; иначе `snapshot: null`, а `ops` — весь журнал с начала);
+ * иначе (клиент уже видел снапшот или новее) — `snapshot: null`, только
+ * операции с `seq > lastSeq`. Снапшоты в T-009 не создаются автоматически
+ * (`saveSnapshot` вызывается вручную/из будущей эксплуатационной политики) —
+ * в первой версии `welcome` почти всегда шлёт весь журнал с начала.
+ */
+export async function welcomeData(
+  db: Db,
+  boardId: string,
+  lastSeq: number | null,
+): Promise<WelcomeData> {
+  throw new Error("welcomeData: not implemented");
+}
