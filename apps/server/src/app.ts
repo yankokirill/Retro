@@ -1,3 +1,4 @@
+import websocketPlugin from "@fastify/websocket";
 import {
   boardIdSchema,
   createBoardRequestSchema,
@@ -9,11 +10,16 @@ import {
   linkTokenSchema,
 } from "@retro/protocol";
 import Fastify, { type FastifyInstance } from "fastify";
+import fp from "fastify-plugin";
 import type { Db } from "./boards/service.js";
 import * as boardsService from "./boards/service.js";
+import { BoardHub } from "./ws/board-hub.js";
+import { registerBoardWebSocket } from "./ws/gateway.js";
 
 export interface AppDeps {
   readonly db?: Db;
+  /** `VOTER_TOKEN_SECRET` — обязателен вместе с `db`, чтобы поднять WS-маршрут (T-009). */
+  readonly voterTokenSecret?: string;
 }
 
 function requireDb(db: Db | undefined): Db {
@@ -128,6 +134,35 @@ export function buildApp(deps: AppDeps = {}): FastifyInstance {
     }
     return reply.code(200).send(result);
   });
+
+  // T-009. Отдельный `if`, не `requireDb` — WS-маршрут не нужен тестам
+  // /healthz и /, которым БД не нужна вовсе (в отличие от REST-маршрутов
+  // досок, которые требуют БД безусловно).
+  if (deps.db && deps.voterTokenSecret) {
+    const db = deps.db;
+    const voterTokenSecret = deps.voterTokenSecret;
+    // `app.register(websocketPlugin)` асинхронно откладывается в очередь
+    // avvio — само тело плагина (в т.ч. его `onRoute`-хук, которым он
+    // подменяет обработчик маршрута на настоящий WS-апгрейд) выполняется
+    // не раньше `.ready()`. Обычный синхронный `app.get(path, {websocket:
+    // true}, handler)` сразу после `app.register(websocketPlugin)` успевает
+    // зарегистрировать маршрут и вызвать `onRoute` РАНЬШЕ, чем плагин
+    // реально поднимется — хук просто не видит этот маршрут, и `handler`
+    // вызывается как обычный HTTP-обработчик `(request, reply)`, а не
+    // WS-обработчик `(socket, request)` (проверено эмпирически, не в
+    // документации @fastify/websocket). Вложенный `register` с `await`
+    // внутри — стандартный способ дождаться реальной загрузки плагина
+    // перед регистрацией маршрута, который на него рассчитывает. `fp()`
+    // (skip-override) обязателен: без него эта функция сама создаёт новый
+    // дочерний контекст инкапсуляции, и декораторы `@fastify/websocket`
+    // (`injectWS`, `websocketServer`) осели бы на нём, а не на `app`.
+    app.register(
+      fp(async (instance) => {
+        await instance.register(websocketPlugin);
+        registerBoardWebSocket(instance, { db, hub: new BoardHub(), voterTokenSecret });
+      }),
+    );
+  }
 
   return app;
 }

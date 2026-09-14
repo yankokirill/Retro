@@ -102,11 +102,12 @@
 ### T-009: WebSocket-синхронизация
 
 - **REQ:** REQ-022 (через сервер), REQ-023 (кр. 3)
-- **Статус:** todo
+- **Статус:** done — ветка `feat/T-009-ws-sync`
 - **Размер:** M
 - **Зависит от:** T-007, T-008
 - **Затрагивает:** apps/server (BoardHub, WS gateway)
 - **Готово, когда:** `hello`/`welcome`/`op`/`ack`/broadcast по `protocol.md` § 6; повтор даёт `ack` с исходным `seq`
+- **Примечание:** сознательно не входит — проверка, что `dot.actor` операции совпадает с `actorId` из `hello` (V1 «owner(a) = u») и любые другие правила V1–V7; сервер пока принимает любую дельту, прошедшую zod-схему (см. T-010/T-011/T-012). Находка при первом прогоне тестов: `app.register(websocketPlugin)` + сразу следом синхронный `app.get(path, {websocket:true}, handler)` регистрирует маршрут раньше, чем плагин `@fastify/websocket` фактически поднимется (`register` асинхронно откладывается в очередь avvio) — его `onRoute`-хук не успевает существовать, и `handler` вызывается как обычный HTTP-обработчик, а не WS. Исправлено вложенным `app.register(fp(async (instance) => { await instance.register(websocketPlugin); ... }))`.
 
 ### T-010: Правила приёма V1–V5
 

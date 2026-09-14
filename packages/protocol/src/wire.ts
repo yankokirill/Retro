@@ -1,5 +1,5 @@
 // Проводной формат дельты — docs/spec/protocol.md § 1–3.
-import type { WireDelta } from "@retro/crdt";
+import type { Dot, WireDelta } from "@retro/crdt";
 import { z } from "zod";
 
 export const LIMITS = {
@@ -115,6 +115,32 @@ const operationDots = (delta: WireDelta): Set<string> =>
     ...delta.votes.map((vote) => dotString(vote.dot)),
     ...delta.unvotes.map((unvote) => dotString(unvote.dot)),
   ]);
+
+/**
+ * Единственный dot операции в дельте от клиента (гарантировано ровно один —
+ * `clientDeltaSchema` ниже). Используется сервером (T-009) для `ack.dot`:
+ * для `unvote` это dot **отзываемого голоса** (`unvoteSchema.dot`), не
+ * свежий dot самой операции отзыва — `unvote` его не имеет (T-002,
+ * `packages/crdt`, `unvote` не тикает часы). Это годится для `ack`: клиент
+ * сам прислал именно этот dot и по нему же сопоставит ответ со своей
+ * очередью. Не путать с ключом идемпотентности журнала операций
+ * (`AppendOpParams.dot` в `apps/server/src/ops/log.ts`) — там для `unvote`
+ * осознанно `null` по другой причине (см. JSDoc там).
+ */
+export function operationDot(delta: WireDelta): Dot {
+  const [entry] = delta.entries;
+  if (entry) return entry.dot;
+  const [vote] = delta.votes;
+  if (vote) return vote.dot;
+  const [unvote] = delta.unvotes;
+  if (unvote) return unvote.dot;
+  throw new Error("operationDot: delta has no operation (empty created/entries/votes/unvotes)");
+}
+
+/** Метка операции, если есть — у `vote`/`unvote` её нет (§ 3.1, 2P-set). */
+export function operationLamport(delta: WireDelta): number | null {
+  return delta.entries[0]?.stamp.lamport ?? null;
+}
 
 /** Дельта от клиента: ровно одна операция и лимиты размера (V2). */
 export const clientDeltaSchema = z
