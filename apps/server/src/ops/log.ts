@@ -170,5 +170,15 @@ export async function welcomeData(
   boardId: string,
   lastSeq: number | null,
 ): Promise<WelcomeData> {
-  throw new Error("welcomeData: not implemented");
+  const snapshot = await loadLatestSnapshot(db, boardId);
+  const baseline = snapshot?.uptoSeq ?? 0;
+  const needsSnapshot = lastSeq === null || lastSeq < baseline;
+  const ops = await opsSince(db, boardId, needsSnapshot ? baseline : lastSeq);
+  return {
+    snapshot:
+      needsSnapshot && snapshot
+        ? { upToSeq: snapshot.uptoSeq, state: toWire(snapshot.state) }
+        : null,
+    ops,
+  };
 }
