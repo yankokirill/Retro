@@ -31,6 +31,7 @@
 | `boardId` | UUID | пока доска не удалена окончательно | сервер |
 | `EntityId` | `${actorId}:${counter}` | как у сущности | = dot операции создания |
 | `voterToken` | непрозрачная строка | как у доски | сервер: HMAC(секрет, `boardId` + `guestId`) |
+| `linkToken` | UUID | как у доски | сервер, по одному на роль `participant`/`viewer` (ADR-0007) |
 
 **Анонимность голосов (REQ-015, кр. 5).** В поле `Vote.user` на проводе и в состоянии CRDT лежит `voterToken`, а не `guestId`. Все реплики хранят одно и то же состояние (сходимость не нарушается), но по токену нельзя узнать человека. Свой `voterToken` клиент получает в `welcome` и по нему считает свои голоса.
 
@@ -119,8 +120,9 @@
 
 | Метод и путь | Тело / ответ | Кто | REQ |
 |---|---|---|---|
-| `POST /api/boards` | `{ title, displayName, voteLimit? }` → `201 { boardId }` | любой гость | REQ-001 |
-| `GET /api/boards/:boardId` | → `200 BoardMeta` без `authors` до `reveal`; `404`, если удалена | любой | REQ-002 |
+| `POST /api/boards` | `{ title, displayName, voteLimit? }` → `201 { boardId, participantLink, viewerLink }`; создатель сразу `owner`, ссылки — для остальных (ADR-0007) | любой гость | REQ-001 |
+| `GET /api/boards/join/:linkToken` | → `200 { boardId, role }`; первый заход `guestId` по этому токену создаёт запись в `members` с этой ролью, повторный — возвращает уже сохранённую роль без изменений (REQ-002, кр. 5–7) | любой | REQ-002 |
+| `GET /api/boards/:boardId` | → `200 BoardMeta` без `authors` до `reveal`; `404`, если удалена **или** у `guestId` нет записи в `members`/он не `owner` (REQ-002, кр. 8 — не через `join`, доска не «нащупывается» по `boardId`) | участник доски | REQ-002 |
 | `GET /api/boards/:boardId/export` | → `200 { columns, actionItems }`; `409 not_revealed` до `reveal` | любая роль | REQ-020 |
 | `DELETE /api/boards/:boardId` | `{ confirm: boardId }` → `202`; `403` не владельцу | owner | REQ-021 |
 | `POST /api/boards/:boardId/restore` | → `200`; `410`, если прошло 7 дней | owner | REQ-021 |
