@@ -185,7 +185,7 @@ materialize : X → View
 View      = ( columns: Col → List<Item>, trash: List<EntityId>, actions: List<ActionView> )
 Item      = CardView | GroupView
 CardView  = ( id, text: List<String>, conflict: Bool, color, votes: ℕ )
-GroupView = ( id, title: List<String>, conflict: Bool, cards: List<CardView> )
+GroupView = ( id, title: List<String>, conflict: Bool, cards: List<CardView>, votes: ℕ )
 ```
 
 Правила:

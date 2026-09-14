@@ -134,12 +134,16 @@ export interface CardView {
  * § 4. Материализованная группа. `title`/`conflict` — R2, как у `text`
  * стикера. `cards` — стикеры этой группы (R3: g* = win_(id,group).v этой
  * группы), в порядке R5; их собственное поле `place` не используется (R4).
+ * `votes` — R6, как у `CardView`: группу можно голосовать наравне со
+ * стикером (REQ-015 кр. 1; ADR-0006 — исходная § 4 не включала это поле,
+ * хотя R6 определена для произвольного `id`, а не только стикера).
  */
 export interface GroupView {
   readonly id: EntityId;
   readonly title: readonly string[];
   readonly conflict: boolean;
   readonly cards: readonly CardView[];
+  readonly votes: number;
 }
 
 /** Элемент колонки — стикер вне группы или группа целиком (R4). */
