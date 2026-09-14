@@ -10,7 +10,8 @@ export type Db = NodePgDatabase<typeof schema>;
 export interface AppendOpParams {
   readonly boardId: string;
   readonly dot: Dot;
-  readonly lamport: number;
+  /** `null` — у `vote`/`unvote` метки нет (§ 3.1, 2P-set); для остальных операций — метка её записи. */
+  readonly lamport: number | null;
   /** Ровно то, что несла одна операция (§ 3 `protocol.md`) — уже в проводном формате. */
   readonly delta: WireDelta;
 }

@@ -138,11 +138,13 @@ docker compose up --build   # полный стек локально как в �
 ```
 boards(id, title, template, phase, settings jsonb, owner_id, created_at, deleted_at)
 members(board_id, user_id, role, display_name, joined_at)
-ops(board_id, seq bigserial, actor, counter, lamport, delta jsonb, received_at,
+ops(board_id, seq bigserial, actor, counter, lamport nullable, delta jsonb, received_at,
     UNIQUE(board_id, actor, counter))
     -- kind из раннего черновика убран (T-008): протокол `op` (protocol.md § 4)
     -- несёт только `delta: WireDelta`, без отдельной метки типа операции —
     -- у столбца не было источника данных.
+    -- lamport nullable (T-008): у vote/unvote метки нет вовсе (§ 3.1
+    -- consistency-model.md, 2P-set), не только у части операций.
 snapshots(board_id, upto_seq, state jsonb, created_at)
 audit(board_id, user_id, action, payload jsonb, at)      -- опасные действия
 usage(user_id, day, ai_requests, ai_cost_cents)          -- для бонуса с бюджетом

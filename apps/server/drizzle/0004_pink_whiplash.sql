@@ -1,0 +1,1 @@
+ALTER TABLE "ops" ALTER COLUMN "lamport" DROP NOT NULL;

@@ -71,6 +71,9 @@ export const members = pgTable(
  * строку (V1, REQ-023 кр.3). `delta` — ровно то, что несла одна операция
  * (`WireDelta` из `@retro/crdt`, § 3 protocol.md), без отдельной метки типа
  * операции — в протоколе её нет (см. правку `CLAUDE.md` § 3 при T-008).
+ * `lamport` — **nullable**: у `vote`/`unvote` в § 3.1 своей метки нет
+ * (2P-set, не поле-регистр), только `dot`; для create/write-операций
+ * заполняется меткой её единственной/общей записи.
  */
 export const ops = pgTable(
   "ops",
@@ -81,7 +84,7 @@ export const ops = pgTable(
       .references(() => boards.id),
     actor: uuid("actor").notNull(),
     counter: integer("counter").notNull(),
-    lamport: integer("lamport").notNull(),
+    lamport: integer("lamport"),
     delta: jsonb("delta").$type<WireDelta>().notNull(),
     receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
   },
