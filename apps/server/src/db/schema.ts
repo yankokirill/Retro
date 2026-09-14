@@ -1,4 +1,16 @@
-import { jsonb, pgTable, primaryKey, text, timestamp, uuid } from "drizzle-orm/pg-core";
+import type { WireDelta } from "@retro/crdt";
+import {
+  bigint,
+  bigserial,
+  integer,
+  jsonb,
+  pgTable,
+  primaryKey,
+  text,
+  timestamp,
+  unique,
+  uuid,
+} from "drizzle-orm/pg-core";
 
 /**
  * Схема доски. `ownerId` и оба `*LinkToken` — с T-007 (ADR-0007): создатель
@@ -6,9 +18,9 @@ import { jsonb, pgTable, primaryKey, text, timestamp, uuid } from "drizzle-orm/p
  * (participant/viewer) присваиваются по одному из двух неугадываемых
  * токенов-приглашений (128 бит, как у `id`), а не порядком захода.
  *
- * Полная схема (ops, snapshots, audit, usage) появится вехами В4/В5+
- * вместе с журналом операций и CRDT-инвариантами
- * (docs/spec/consistency-model.md, CLAUDE.md § 3 «Хранилище»).
+ * `ops`/`snapshots` — с T-008 (журнал операций и снапшоты). Остаток
+ * (audit, usage) появится на В5+ (docs/spec/consistency-model.md,
+ * CLAUDE.md § 3 «Хранилище»).
  */
 export interface BoardSettings {
   readonly voteLimit: number;
@@ -48,4 +60,50 @@ export const members = pgTable(
     joinedAt: timestamp("joined_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [primaryKey({ columns: [table.boardId, table.userId] })],
+);
+
+/**
+ * Журнал принятых операций (T-008, REQ-023 кр.3, REQ-027; § 6
+ * `consistency-model.md`). `seq` — общий по всем доскам bigserial: клиент
+ * сравнивает его только в пределах своей доски (`protocol.md` § 5–6), гэпы от
+ * других досок не мешают. `UNIQUE(board_id, actor, counter)` — идемпотентность
+ * приёма: повторно отправленная операция (тот же dot) не создаёт вторую
+ * строку (V1, REQ-023 кр.3). `delta` — ровно то, что несла одна операция
+ * (`WireDelta` из `@retro/crdt`, § 3 protocol.md), без отдельной метки типа
+ * операции — в протоколе её нет (см. правку `CLAUDE.md` § 3 при T-008).
+ */
+export const ops = pgTable(
+  "ops",
+  {
+    seq: bigserial("seq", { mode: "number" }).primaryKey(),
+    boardId: uuid("board_id")
+      .notNull()
+      .references(() => boards.id),
+    actor: uuid("actor").notNull(),
+    counter: integer("counter").notNull(),
+    lamport: integer("lamport").notNull(),
+    delta: jsonb("delta").$type<WireDelta>().notNull(),
+    receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [unique().on(table.boardId, table.actor, table.counter)],
+);
+
+/**
+ * Снапшоты (T-008, REQ-027; § 6 `consistency-model.md`). `state` —
+ * `compact(X_S(uptoSeq))` в проводном формате. Несколько строк на доску
+ * допустимы (история); действующий — с максимальным `uptoSeq`
+ * (`loadLatestSnapshot` в `ops/log.ts`). Инвариант I5:
+ * `materialize(replay(ops)) == materialize(snapshot ⊔ ops после uptoSeq)`.
+ */
+export const snapshots = pgTable(
+  "snapshots",
+  {
+    boardId: uuid("board_id")
+      .notNull()
+      .references(() => boards.id),
+    uptoSeq: bigint("upto_seq", { mode: "number" }).notNull(),
+    state: jsonb("state").$type<WireDelta>().notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [primaryKey({ columns: [table.boardId, table.uptoSeq] })],
 );
