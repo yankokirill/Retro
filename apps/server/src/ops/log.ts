@@ -4,7 +4,7 @@
 
 import type { Dot, State, WireDelta } from "@retro/crdt";
 import { compact as compactState, empty, fromWire, merge, toWire } from "@retro/crdt";
-import { and, asc, desc, eq, gt } from "drizzle-orm";
+import { and, asc, desc, eq, gt, max } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "../db/schema.js";
 import { ops, snapshots } from "../db/schema.js";
@@ -118,7 +118,19 @@ export interface ActorClock {
  * недосчиталась бы — журнал строк не теряет никогда.
  */
 export async function actorClock(db: Db, boardId: string, actor: string): Promise<ActorClock> {
-  throw new Error("actorClock: not implemented");
+  const [actorRow] = await db
+    .select({ lastCounter: max(ops.counter), lastLamport: max(ops.lamport) })
+    .from(ops)
+    .where(and(eq(ops.boardId, boardId), eq(ops.actor, actor)));
+  const [boardRow] = await db
+    .select({ boardMaxLamport: max(ops.lamport) })
+    .from(ops)
+    .where(eq(ops.boardId, boardId));
+  return {
+    lastCounter: actorRow?.lastCounter ?? 0,
+    lastLamport: actorRow?.lastLamport ?? 0,
+    boardMaxLamport: boardRow?.boardMaxLamport ?? 0,
+  };
 }
 
 export interface OpRow {
