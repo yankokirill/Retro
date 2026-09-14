@@ -262,3 +262,63 @@ export async function grantFacilitator(
 
   return "ok";
 }
+
+export interface BoardVoteSettings {
+  readonly phase: Phase;
+  readonly voteLimit: number;
+}
+
+/**
+ * Фаза и лимит голосов доски одним запросом — оба нужны `ws/gateway.ts` для
+ * V7 (`ops/votes.ts` `checkVotePermission`/`checkVoteLimit`) на каждый
+ * `vote`/`unvote`. `null` — доска не существует/удалена.
+ */
+export async function getBoardVoteSettings(
+  db: Db,
+  boardId: string,
+): Promise<BoardVoteSettings | null> {
+  const [board] = await db
+    .select({ phase: boards.phase, settings: boards.settings })
+    .from(boards)
+    .where(and(eq(boards.id, boardId), isNull(boards.deletedAt)));
+  if (!board) return null;
+  return { phase: board.phase as Phase, voteLimit: board.settings.voteLimit };
+}
+
+export type ResetVotesResult = "ok" | "forbidden" | "not_found";
+
+export interface ResetVotesParams {
+  readonly boardId: string;
+  readonly guestId: string;
+}
+
+/**
+ * REQ-016. Проверяет только роль (owner/facilitator) — сам массовый отзыв
+ * голосов реализуется как по одному `unvote` на активный голос (REQ-016,
+ * «не отдельная примитивная операция CRDT»), а для этого нужны и состояние
+ * доски (`replayFromSnapshot`), и `BoardHub` для рассылки каждого `unvote`
+ * как обычного `op` — недоступны на уровне `boards/service.ts` (только
+ * `db`), поэтому сам отзыв делает `ws/gateway.ts` после `"ok"` отсюда.
+ */
+export async function resetVotes(db: Db, params: ResetVotesParams): Promise<ResetVotesResult> {
+  const [board] = await db
+    .select({ ownerId: boards.ownerId })
+    .from(boards)
+    .where(and(eq(boards.id, params.boardId), isNull(boards.deletedAt)));
+  if (!board) return "not_found";
+
+  let role: Role;
+  if (board.ownerId === params.guestId) {
+    role = "owner";
+  } else {
+    const [member] = await db
+      .select({ role: members.role })
+      .from(members)
+      .where(and(eq(members.boardId, params.boardId), eq(members.userId, params.guestId)));
+    if (!member) return "not_found";
+    role = member.role as Role;
+  }
+  if (role !== "owner" && role !== "facilitator") return "forbidden";
+
+  return "ok";
+}

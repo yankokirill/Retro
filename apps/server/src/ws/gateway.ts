@@ -1,11 +1,12 @@
 // T-009 — WS-синхронизация: hello/welcome/op/ack/broadcast (protocol.md § 4–6,
 // REQ-022, REQ-023 кр. 3). T-010 добавил проверку V1/V3/V4/V5
 // (ops/validate.js). T-011 добавил V6 (права/фазы, ops/permissions.js) для
-// операций над стикерами/action item и команду `setPhase`.
+// операций над стикерами/action item и команду `setPhase`. T-012 добавил V7
+// (голоса, ops/votes.js) и команду `resetVotes`.
 //
-// Лимит голосов (V7) — T-012, не здесь: vote/unvote проходят без проверки
-// прав (`classifyAction` возвращает `null` для них, см. ops/permissions.js).
-// Остальные команды (grantFacilitator/resetVotes/timer) — тоже не здесь.
+// Остальные команды (grantFacilitator/timer) — по-прежнему не здесь.
+
+import { activeVotes, toWire, unvote } from "@retro/crdt";
 import {
   type BoardMeta,
   clientMessageSchema,
@@ -29,6 +30,7 @@ import {
 } from "../ops/log.js";
 import { checkPermission, classifyAction } from "../ops/permissions.js";
 import { validateOp } from "../ops/validate.js";
+import { checkVoteLimit, checkVoteOwnership, checkVotePermission } from "../ops/votes.js";
 import { BoardHub, type Subscriber } from "./board-hub.js";
 import { computeVoterToken } from "./voter-token.js";
 
@@ -148,6 +150,7 @@ export function registerBoardWebSocket(app: FastifyInstance, deps: WsGatewayDeps
           const dot = operationDot(message.delta);
           const lamport = operationLamport(message.delta);
           const isUnvote = message.delta.unvotes.length > 0;
+          const isVote = message.delta.votes.length > 0;
 
           // V1: точное совпадение (actor, counter) в журнале — повтор
           // (переподключение, дубль доставки), не новая операция: ack без
@@ -207,6 +210,58 @@ export function registerBoardWebSocket(app: FastifyInstance, deps: WsGatewayDeps
             }
           }
 
+          // V7 (T-012): права/фаза, лимит, владение для vote/unvote.
+          if (isVote || isUnvote) {
+            const settings = await boardsService.getBoardVoteSettings(deps.db, boardId);
+            if (!settings) {
+              throw new Error(`vote: board unexpectedly not found (boardId=${boardId})`);
+            }
+            const votePermission = checkVotePermission(
+              subscriber.role,
+              settings.phase,
+              isVote ? "vote" : "unvote",
+            );
+            if (!votePermission.ok) {
+              send(socket, {
+                type: "reject",
+                dot,
+                reason: votePermission.reason,
+                message: votePermission.message,
+              });
+              return;
+            }
+
+            const voterToken = computeVoterToken(
+              deps.voterTokenSecret,
+              boardId,
+              subscriber.guestId,
+            );
+            const voteCheck = isVote
+              ? checkVoteLimit(
+                  state,
+                  // clientDeltaSchema гарантирует ровно один элемент в votes.
+                  message.delta.votes[0]?.user ?? "",
+                  voterToken,
+                  settings.voteLimit,
+                )
+              : checkVoteOwnership(
+                  state,
+                  dot,
+                  // clientDeltaSchema гарантирует ровно один элемент в unvotes.
+                  message.delta.unvotes[0]?.target ?? "",
+                  voterToken,
+                );
+            if (!voteCheck.ok) {
+              send(socket, {
+                type: "reject",
+                dot,
+                reason: voteCheck.reason,
+                message: voteCheck.message,
+              });
+              return;
+            }
+          }
+
           const { seq } = await appendOp(deps.db, {
             boardId,
             dot: isUnvote ? null : dot,
@@ -256,8 +311,50 @@ export function registerBoardWebSocket(app: FastifyInstance, deps: WsGatewayDeps
             return;
           }
 
-          // Остальные команды (grantFacilitator/resetVotes/timer) — вне
-          // T-011, здесь не реализованы.
+          if (message.command.type === "resetVotes") {
+            const result = await boardsService.resetVotes(deps.db, {
+              boardId,
+              guestId: subscriber.guestId,
+            });
+            if (result === "not_found") {
+              // Как и в setPhase — недостижимо в норме (гость уже прошёл
+              // проверку членства в hello), не пытаемся угадать reason.
+              throw new Error(`resetVotes: board unexpectedly not found (boardId=${boardId})`);
+            }
+            if (result !== "ok") {
+              send(socket, {
+                type: "commandResult",
+                id: message.id,
+                ok: false,
+                reason: result,
+                message: `resetVotes: ${result}`,
+              });
+              return;
+            }
+
+            // REQ-016: массовый отзыв — по одному unvote на активный голос
+            // (не отдельная примитивная операция CRDT), рассылается всем
+            // подписчикам как обычный `op` (никто из них этот отзыв ещё не
+            // применял локально — в отличие от обычного op, здесь нет
+            // клиента-автора, которому уже не нужно повторно слать своё же).
+            const { state } = await replayFromSnapshot(deps.db, boardId);
+            for (const v of activeVotes(state)) {
+              const delta = toWire(unvote(state, v.dot, v.target));
+              const { seq } = await appendOp(deps.db, {
+                boardId,
+                dot: null,
+                lamport: null,
+                delta,
+              });
+              deps.hub.broadcast(boardId, { type: "op", seq, delta });
+            }
+
+            send(socket, { type: "commandResult", id: message.id, ok: true });
+            return;
+          }
+
+          // Остальные команды (grantFacilitator/timer) — вне T-012, здесь
+          // не реализованы.
           return;
         }
       }
