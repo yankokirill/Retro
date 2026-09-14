@@ -216,11 +216,11 @@ export function registerBoardWebSocket(app: FastifyInstance, deps: WsGatewayDeps
             if (!settings) {
               throw new Error(`vote: board unexpectedly not found (boardId=${boardId})`);
             }
-            const votePermission = checkVotePermission(
-              subscriber.role,
-              settings.phase,
-              isVote ? "vote" : "unvote",
-            );
+            const votePermission = checkVotePermission({
+              role: subscriber.role,
+              phase: settings.phase,
+              action: isVote ? "vote" : "unvote",
+            });
             if (!votePermission.ok) {
               send(socket, {
                 type: "reject",

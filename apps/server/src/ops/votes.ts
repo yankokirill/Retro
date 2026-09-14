@@ -21,13 +21,29 @@ export type CheckVoteResult =
 
 export type VoteAction = "vote" | "unvote";
 
+export interface CheckVotePermissionParams {
+  readonly role: Role;
+  readonly phase: Phase;
+  readonly action: VoteAction;
+}
+
 /**
  * REQ-015, «Роли/фазы»: `owner`/`facilitator` — любая фаза; `participant` —
  * только `vote`; `viewer` — никогда. Не знает о лимите/владении — те
- * `checkVoteLimit`/`checkVoteOwnership` ниже.
+ * `checkVoteLimit`/`checkVoteOwnership` ниже. Объект-параметр — как
+ * `checkPermission` (`ops/permissions.ts`, V6), для единообразия стиля.
  */
-export function checkVotePermission(role: Role, phase: Phase, action: VoteAction): CheckVoteResult {
-  throw new Error("checkVotePermission: not implemented");
+export function checkVotePermission(params: CheckVotePermissionParams): CheckVoteResult {
+  const { role, phase, action } = params;
+  if (role === "owner" || role === "facilitator") return { ok: true };
+  if (role === "viewer") return reject("forbidden", `viewer cannot ${action}`);
+  // role === "participant"
+  if (phase !== "vote") return reject("wrong_phase", `${action} not allowed in phase ${phase}`);
+  return { ok: true };
+}
+
+function reject(reason: RejectReason, message: string): CheckVoteResult {
+  return { ok: false, reason, message };
 }
 
 /**
@@ -52,7 +68,14 @@ export function checkVoteLimit(
   connectionVoterToken: string,
   voteLimit: number,
 ): CheckVoteResult {
-  throw new Error("checkVoteLimit: not implemented");
+  if (claimedVoterToken !== connectionVoterToken) {
+    return reject("not_own_vote", "vote.user does not match this connection's voter token");
+  }
+  const spent = activeVotes(state).filter((v) => v.user === connectionVoterToken).length;
+  if (spent >= voteLimit) {
+    return reject("vote_limit", `voter already used all ${voteLimit} votes`);
+  }
+  return { ok: true };
 }
 
 /**
@@ -66,5 +89,14 @@ export function checkVoteOwnership(
   target: EntityId,
   voterToken: string,
 ): CheckVoteResult {
-  throw new Error("checkVoteOwnership: not implemented");
+  const activeVote = activeVotes(state, target).find(
+    (v) => v.dot.actor === voteDot.actor && v.dot.counter === voteDot.counter,
+  );
+  if (!activeVote) {
+    return reject("not_own_vote", "vote does not exist or was already revoked");
+  }
+  if (activeVote.user !== voterToken) {
+    return reject("not_own_vote", "cannot revoke another participant's vote");
+  }
+  return { ok: true };
 }

@@ -15,7 +15,7 @@
 // `packages/crdt/src/ops/**` не читались.
 
 import type { EntityId } from "@retro/crdt";
-import { createSticker, empty, newClock, setColor, toWire } from "@retro/crdt";
+import { createSticker, dotKey, empty, newClock, setColor, toWire, vote } from "@retro/crdt";
 import type { ServerMessage } from "@retro/protocol";
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from "@testcontainers/postgresql";
 import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
@@ -438,5 +438,345 @@ describe("REQ-024: reject доходит до клиента по WS и не л�
     expect(ack.dot).toEqual(created.dot);
 
     ws.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-012 — «Голоса: лимит и сброс (V7)»: приёмочные тесты через реальный WS +
+// Postgres, написанные ДО реализации и не глядя в неё (docs/spec/
+// requirements.md REQ-014, REQ-015 (кр. 2, 6), REQ-016;
+// docs/spec/consistency-model.md § 7 правило V7, § 8 I6;
+// docs/spec/protocol.md § 4 command `resetVotes`, § 5 reason `vote_limit`/
+// `not_own_vote`). `apps/server/src/boards/service.ts` (кроме уже
+// используемых выше `createBoard`/`joinByLink`) и `ws/gateway.ts` не
+// читались — только протокол/CLAUDE.md/permissions.md определяют ожидаемое
+// поведение ниже (по аналогии с T-011 setPhase-тестами выше в этом файле).
+//
+// `vote()` (`@retro/crdt`) не пишет `Stamp` в `Vote` — на проводе у голосов
+// нет `stamp` (`packages/protocol/src/wire.ts` `voteSchema`), поэтому для
+// первого голоса свежего актора можно смело брать `vote(empty(), ...)`:
+// таргет проверяется сервером через V3 (существование сущности), не через
+// локально переданное состояние.
+// ---------------------------------------------------------------------------
+
+/** Создаёт доску с owner'ом и заданным лимитом голосов, возвращает обе ссылки-приглашения. */
+async function newBoardWithLinks(voteLimit: number): Promise<{
+  boardId: string;
+  ownerId: string;
+  participantLink: string;
+  viewerLink: string;
+}> {
+  const ownerId = newGuestId();
+  const created = await createBoard(db, {
+    title: "T-012 test board",
+    displayName: "Owner",
+    voteLimit,
+    ownerId,
+  });
+  const viewerLink = (created as { viewerLink?: string }).viewerLink;
+  if (!viewerLink) throw new Error("createBoard did not return viewerLink");
+  return {
+    boardId: created.boardId,
+    ownerId,
+    participantLink: created.participantLink,
+    viewerLink,
+  };
+}
+
+/** Owner создаёт один стикер и переводит доску в фазу `vote`. Возвращает id стикера. */
+async function ownerCreatesStickerAndEntersVotePhase(
+  boardId: string,
+  ownerId: string,
+): Promise<EntityId> {
+  const ws = await connect(boardId);
+  const reader = messageReader(ws);
+  const actorId = newActorId();
+  sendHello(ws, { guestId: ownerId, displayName: "Owner", actorId });
+  const welcome = await reader.next();
+  expect(welcome.type).toBe("welcome");
+
+  const created = createSticker(empty(), newClock(actorId), {
+    column: "start",
+    frac: "1",
+    text: "vote me",
+    color: "yellow",
+  });
+  ws.send(JSON.stringify({ type: "op", delta: toWire(created.delta) }));
+  const ack = await reader.next();
+  expect(ack.type).toBe("ack");
+
+  ws.send(
+    JSON.stringify({
+      type: "command",
+      id: "cmd-enter-vote",
+      command: { type: "setPhase", phase: "vote" },
+    }),
+  );
+  // commandResult и meta приходят в неопределённом порядке (как в T-011 setPhase-тестах выше).
+  const first = await reader.next();
+  const second = await reader.next();
+  const commandResult = [first, second].find((msg) => msg.type === "commandResult");
+  expect(commandResult?.ok).toBe(true);
+
+  ws.close();
+  return dotKey(created.dot) as EntityId;
+}
+
+describe("REQ-015 (кр. 1, 2): голосование до лимита и отказ сверх лимита", () => {
+  it("REQ-014/REQ-015 кр.1-2: participant с voteLimit=1 голосует один раз (ack), второй раз — reject vote_limit", async () => {
+    const { boardId, ownerId, participantLink } = await newBoardWithLinks(1);
+    const stickerId = await ownerCreatesStickerAndEntersVotePhase(boardId, ownerId);
+
+    const participantId = newGuestId();
+    const joined = await joinByLink(db, {
+      linkToken: participantLink,
+      guestId: participantId,
+      displayName: "Voter",
+    });
+    expect(joined?.role).toBe("participant");
+
+    const ws = await connect(boardId);
+    const reader = messageReader(ws);
+    const actorId = newActorId();
+    sendHello(ws, { guestId: participantId, displayName: "Voter", actorId });
+    const welcome = await reader.next();
+    expect(welcome.type).toBe("welcome");
+    if (welcome.type !== "welcome") throw new Error("expected welcome");
+    const voterToken = welcome.voterToken;
+
+    const firstVote = vote(empty(), newClock(actorId), stickerId, voterToken);
+    ws.send(JSON.stringify({ type: "op", delta: toWire(firstVote.delta) }));
+    const firstResult = await reader.next();
+    expect(firstResult.type).toBe("ack");
+    if (firstResult.type !== "ack") throw new Error("expected ack for first vote");
+    expect(firstResult.dot).toEqual(firstVote.dot);
+
+    const secondVote = vote(empty(), firstVote.clock, stickerId, voterToken);
+    ws.send(JSON.stringify({ type: "op", delta: toWire(secondVote.delta) }));
+    const secondResult = await reader.next();
+    expect(secondResult.type).toBe("reject");
+    if (secondResult.type !== "reject") throw new Error("expected reject for second vote");
+    expect(secondResult.dot).toEqual(secondVote.dot);
+    expect(secondResult.reason).toBe("vote_limit");
+    expect(secondResult.message.length).toBeGreaterThan(0);
+
+    ws.close();
+  });
+});
+
+describe("REQ-015 (кр. 6, I6): лимит голосов держится под конкурентными vote из двух вкладок одного участника", () => {
+  it("REQ-015 кр.6/I6: две вкладки одного guestId с voteLimit=1 голосуют одновременно — ровно одна принята (ack), другая отклонена (vote_limit)", async () => {
+    const { boardId, ownerId, participantLink } = await newBoardWithLinks(1);
+    const stickerId = await ownerCreatesStickerAndEntersVotePhase(boardId, ownerId);
+
+    const participantId = newGuestId();
+    const joined = await joinByLink(db, {
+      linkToken: participantLink,
+      guestId: participantId,
+      displayName: "TwoTabs",
+    });
+    expect(joined?.role).toBe("participant");
+
+    const wsTab1 = await connect(boardId);
+    const wsTab2 = await connect(boardId);
+    const readerTab1 = messageReader(wsTab1);
+    const readerTab2 = messageReader(wsTab2);
+
+    const actorTab1 = newActorId();
+    const actorTab2 = newActorId();
+    sendHello(wsTab1, { guestId: participantId, displayName: "TwoTabs", actorId: actorTab1 });
+    sendHello(wsTab2, { guestId: participantId, displayName: "TwoTabs", actorId: actorTab2 });
+
+    const welcomeTab1 = await readerTab1.next();
+    const welcomeTab2 = await readerTab2.next();
+    expect(welcomeTab1.type).toBe("welcome");
+    expect(welcomeTab2.type).toBe("welcome");
+    if (welcomeTab1.type !== "welcome" || welcomeTab2.type !== "welcome") {
+      throw new Error("expected welcome on both tabs");
+    }
+    // Один и тот же guestId => один и тот же voterToken на обеих вкладках
+    // (docs/spec/protocol.md § 2: voterToken = HMAC(secret, boardId + guestId)),
+    // это то, что вообще делает "лимит на пользователя, не на вкладку" проверяемым.
+    expect(welcomeTab1.voterToken).toBe(welcomeTab2.voterToken);
+    const voterToken = welcomeTab1.voterToken;
+
+    // Два независимых актора (разные вкладки) голосуют за один и тот же
+    // стикер практически одновременно — оба сообщения уходят до получения
+    // любого ответа, чтобы не гарантировать порядок вручную.
+    const voteTab1 = vote(empty(), newClock(actorTab1), stickerId, voterToken);
+    const voteTab2 = vote(empty(), newClock(actorTab2), stickerId, voterToken);
+    wsTab1.send(JSON.stringify({ type: "op", delta: toWire(voteTab1.delta) }));
+    wsTab2.send(JSON.stringify({ type: "op", delta: toWire(voteTab2.delta) }));
+
+    const resultTab1 = await readerTab1.next();
+    const resultTab2 = await readerTab2.next();
+    const results = [resultTab1, resultTab2];
+
+    const acks = results.filter((msg) => msg.type === "ack");
+    const rejects = results.filter((msg) => msg.type === "reject");
+    expect(acks).toHaveLength(1);
+    expect(rejects).toHaveLength(1);
+    const [reject] = rejects;
+    if (reject?.type !== "reject") throw new Error("expected exactly one reject");
+    expect(reject.reason).toBe("vote_limit");
+
+    wsTab1.close();
+    wsTab2.close();
+  });
+});
+
+describe("REQ-016: сброс голосов доступен только owner/facilitator", () => {
+  it("REQ-016 кр.2: participant не может сбросить голоса — commandResult ok:false, forbidden", async () => {
+    const { boardId, ownerId, participantLink } = await newBoardWithLinks(3);
+    await ownerCreatesStickerAndEntersVotePhase(boardId, ownerId);
+
+    const participantId = newGuestId();
+    await joinByLink(db, {
+      linkToken: participantLink,
+      guestId: participantId,
+      displayName: "Alice",
+    });
+
+    const ws = await connect(boardId);
+    const reader = messageReader(ws);
+    sendHello(ws, { guestId: participantId, displayName: "Alice", actorId: newActorId() });
+    const welcome = await reader.next();
+    expect(welcome.type).toBe("welcome");
+
+    ws.send(
+      JSON.stringify({
+        type: "command",
+        id: "cmd-reset-forbidden",
+        command: { type: "resetVotes" },
+      }),
+    );
+    const result = await reader.next();
+    expect(result.type).toBe("commandResult");
+    if (result.type !== "commandResult") throw new Error("expected commandResult");
+    expect(result.id).toBe("cmd-reset-forbidden");
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("forbidden");
+
+    ws.close();
+  });
+
+  it("REQ-016 кр.2: viewer не может сбросить голоса — commandResult ok:false, forbidden", async () => {
+    const { boardId, ownerId, viewerLink } = await newBoardWithLinks(3);
+    await ownerCreatesStickerAndEntersVotePhase(boardId, ownerId);
+
+    const viewerId = newGuestId();
+    const joined = await joinByLink(db, {
+      linkToken: viewerLink,
+      guestId: viewerId,
+      displayName: "Bob",
+    });
+    expect(joined?.role).toBe("viewer");
+
+    const ws = await connect(boardId);
+    const reader = messageReader(ws);
+    sendHello(ws, { guestId: viewerId, displayName: "Bob", actorId: newActorId() });
+    const welcome = await reader.next();
+    expect(welcome.type).toBe("welcome");
+
+    ws.send(
+      JSON.stringify({ type: "command", id: "cmd-reset-viewer", command: { type: "resetVotes" } }),
+    );
+    const result = await reader.next();
+    expect(result.type).toBe("commandResult");
+    if (result.type !== "commandResult") throw new Error("expected commandResult");
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe("forbidden");
+
+    ws.close();
+  });
+});
+
+describe("REQ-016: сброс голосов освобождает лимит всех участников", () => {
+  it("REQ-016 кр.1: owner сбрасывает голоса — исчерпавший лимит participant снова может голосовать, unvote-op рассылается всем подписчикам включая инициатора", async () => {
+    const { boardId, ownerId, participantLink } = await newBoardWithLinks(1);
+    const stickerId = await ownerCreatesStickerAndEntersVotePhase(boardId, ownerId);
+
+    const participantId = newGuestId();
+    const joined = await joinByLink(db, {
+      linkToken: participantLink,
+      guestId: participantId,
+      displayName: "Exhausted",
+    });
+    expect(joined?.role).toBe("participant");
+
+    const wsOwner = await connect(boardId);
+    const wsParticipant = await connect(boardId);
+    const readerOwner = messageReader(wsOwner);
+    const readerParticipant = messageReader(wsParticipant);
+
+    const ownerActorId = newActorId();
+    const participantActorId = newActorId();
+    sendHello(wsOwner, { guestId: ownerId, displayName: "Owner", actorId: ownerActorId });
+    sendHello(wsParticipant, {
+      guestId: participantId,
+      displayName: "Exhausted",
+      actorId: participantActorId,
+    });
+    const welcomeOwner = await readerOwner.next();
+    const welcomeParticipant = await readerParticipant.next();
+    expect(welcomeOwner.type).toBe("welcome");
+    expect(welcomeParticipant.type).toBe("welcome");
+    if (welcomeParticipant.type !== "welcome") throw new Error("expected welcome");
+    const voterToken = welcomeParticipant.voterToken;
+
+    // Тратим единственный голос (voteLimit=1).
+    const firstVote = vote(empty(), newClock(participantActorId), stickerId, voterToken);
+    wsParticipant.send(JSON.stringify({ type: "op", delta: toWire(firstVote.delta) }));
+    const firstAck = await readerParticipant.next();
+    expect(firstAck.type).toBe("ack");
+    if (firstAck.type !== "ack") throw new Error("expected ack");
+
+    // Подтверждаем, что лимит действительно исчерпан.
+    const secondVote = vote(empty(), firstVote.clock, stickerId, voterToken);
+    wsParticipant.send(JSON.stringify({ type: "op", delta: toWire(secondVote.delta) }));
+    const exhausted = await readerParticipant.next();
+    expect(exhausted.type).toBe("reject");
+    if (exhausted.type !== "reject") throw new Error("expected reject before reset");
+    expect(exhausted.reason).toBe("vote_limit");
+
+    // Owner сбрасывает голоса доски.
+    wsOwner.send(
+      JSON.stringify({ type: "command", id: "cmd-reset", command: { type: "resetVotes" } }),
+    );
+
+    // Инициатор получает commandResult ok:true И op-рассылку с unvote своего
+    // же действия (§ 6 protocol.md рассылает broadcast всем, включая
+    // инициатора — никто ещё не применял эти unvote локально).
+    const ownerFirst = await readerOwner.next();
+    const ownerSecond = await readerOwner.next();
+    const ownerCommandResult = [ownerFirst, ownerSecond].find((m) => m.type === "commandResult");
+    const ownerOp = [ownerFirst, ownerSecond].find((m) => m.type === "op");
+    expect(ownerCommandResult?.type).toBe("commandResult");
+    if (ownerCommandResult?.type !== "commandResult") throw new Error("expected commandResult");
+    expect(ownerCommandResult.id).toBe("cmd-reset");
+    expect(ownerCommandResult.ok).toBe(true);
+    expect(ownerOp?.type).toBe("op");
+    if (ownerOp?.type !== "op") throw new Error("expected op broadcast to initiator");
+    expect(ownerOp.delta.unvotes).toHaveLength(1);
+    expect(ownerOp.delta.unvotes[0]?.dot).toEqual(firstVote.dot);
+    expect(ownerOp.delta.unvotes[0]?.target).toBe(stickerId);
+
+    // Участник (не инициатор) тоже получает op-рассылку с тем же unvote.
+    const participantOp = await readerParticipant.next();
+    expect(participantOp.type).toBe("op");
+    if (participantOp.type !== "op") throw new Error("expected op broadcast to participant");
+    expect(participantOp.delta.unvotes).toHaveLength(1);
+    expect(participantOp.delta.unvotes[0]?.dot).toEqual(firstVote.dot);
+
+    // После сброса лимит снова доступен: тот же участник может проголосовать заново.
+    const thirdVote = vote(empty(), secondVote.clock, stickerId, voterToken);
+    wsParticipant.send(JSON.stringify({ type: "op", delta: toWire(thirdVote.delta) }));
+    const afterReset = await readerParticipant.next();
+    expect(afterReset.type).toBe("ack");
+    if (afterReset.type !== "ack") throw new Error("expected ack after resetVotes freed the limit");
+    expect(afterReset.dot).toEqual(thirdVote.dot);
+
+    wsOwner.close();
+    wsParticipant.close();
   });
 });
