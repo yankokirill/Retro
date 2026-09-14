@@ -146,6 +146,7 @@ ops(board_id, seq bigserial, actor, counter, lamport nullable, delta jsonb, rece
     -- lamport nullable (T-008): у vote/unvote метки нет вовсе (§ 3.1
     -- consistency-model.md, 2P-set), не только у части операций.
 snapshots(board_id, upto_seq, state jsonb, created_at)
+authors(board_id, entity_id, guest_id)                   -- T-011: авторство стикера, вне CRDT (protocol.md § 2)
 audit(board_id, user_id, action, payload jsonb, at)      -- опасные действия
 usage(user_id, day, ai_requests, ai_cost_cents)          -- для бонуса с бюджетом
 ```

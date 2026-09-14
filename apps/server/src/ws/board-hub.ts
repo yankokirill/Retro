@@ -2,11 +2,21 @@
 // (docs/spec/protocol.md § 5–6: «остальным — op в их проекции»).
 
 import type { WebSocket } from "@fastify/websocket";
-import type { ServerMessage } from "@retro/protocol";
+import type { Role, ServerMessage } from "@retro/protocol";
 
 export interface Subscriber {
   readonly socket: WebSocket;
   readonly actorId: string;
+  /** guestId из `hello` — для авторства (T-011, `ops/authors.ts`) и матрицы прав. */
+  readonly guestId: string;
+  /**
+   * Роль на момент `hello`, кэшируется на время соединения (T-011). Может
+   * устареть, если роль сменится посреди сессии (`grantFacilitator`) — этот
+   * канал ещё не подключён к WS (`boards/service.ts`, JSDoc там), так что
+   * пока это не наблюдаемо; переисследовать, когда `grantFacilitator`
+   * станет WS `command`.
+   */
+  readonly role: Role;
 }
 
 /**
