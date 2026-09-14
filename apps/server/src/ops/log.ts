@@ -1,9 +1,13 @@
 // T-008 — журнал операций и снапшоты (REQ-023 кр.3, REQ-027; § 6
 // `docs/spec/consistency-model.md`). Функции берут `db` параметром, как
 // `boards/service.ts` — тестируемо без переменных окружения.
+
 import type { Dot, State, WireDelta } from "@retro/crdt";
+import { compact as compactState, empty, fromWire, merge, toWire } from "@retro/crdt";
+import { and, asc, desc, eq, gt } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "../db/schema.js";
+import { ops, snapshots } from "../db/schema.js";
 
 export type Db = NodePgDatabase<typeof schema>;
 
@@ -38,8 +42,35 @@ export interface AppendOpResult {
  * журнала может немного вырасти — полная защита от дублей unvote на уровне
  * протокола остаётся за V1 в T-010.
  */
-export async function appendOp(_db: Db, _params: AppendOpParams): Promise<AppendOpResult> {
-  throw new Error("appendOp: not implemented");
+export async function appendOp(db: Db, params: AppendOpParams): Promise<AppendOpResult> {
+  const [inserted] = await db
+    .insert(ops)
+    .values({
+      boardId: params.boardId,
+      actor: params.dot?.actor ?? null,
+      counter: params.dot?.counter ?? null,
+      lamport: params.lamport,
+      delta: params.delta,
+    })
+    .onConflictDoNothing({ target: [ops.boardId, ops.actor, ops.counter] })
+    .returning({ seq: ops.seq });
+  if (inserted) return { seq: inserted.seq };
+
+  // NULL никогда не конфликтует в UNIQUE (Postgres) — конфликт возможен только
+  // когда dot задан и (actor, counter) уже встречались для этой доски.
+  if (!params.dot) throw new Error("appendOp: unexpected conflict for dot === null");
+  const [existing] = await db
+    .select({ seq: ops.seq })
+    .from(ops)
+    .where(
+      and(
+        eq(ops.boardId, params.boardId),
+        eq(ops.actor, params.dot.actor),
+        eq(ops.counter, params.dot.counter),
+      ),
+    );
+  if (!existing) throw new Error("appendOp: row missing after conflict");
+  return { seq: existing.seq };
 }
 
 export interface OpRow {
@@ -48,8 +79,12 @@ export interface OpRow {
 }
 
 /** Операции доски со `seq > sinceSeq`, по возрастанию `seq` (переподключение, protocol.md § 6). */
-export async function opsSince(_db: Db, _boardId: string, _sinceSeq: number): Promise<OpRow[]> {
-  throw new Error("opsSince: not implemented");
+export async function opsSince(db: Db, boardId: string, sinceSeq: number): Promise<OpRow[]> {
+  return db
+    .select({ seq: ops.seq, delta: ops.delta })
+    .from(ops)
+    .where(and(eq(ops.boardId, boardId), gt(ops.seq, sinceSeq)))
+    .orderBy(asc(ops.seq));
 }
 
 export interface ReplayResult {
@@ -58,8 +93,15 @@ export interface ReplayResult {
 }
 
 /** X_S(n) — replay всего журнала доски с начала (§ 6). `uptoSeq` — seq последней применённой операции (0, если журнал пуст). */
-export async function replay(_db: Db, _boardId: string): Promise<ReplayResult> {
-  throw new Error("replay: not implemented");
+export async function replay(db: Db, boardId: string): Promise<ReplayResult> {
+  const rows = await opsSince(db, boardId, 0);
+  let state: State = empty();
+  let uptoSeq = 0;
+  for (const row of rows) {
+    state = merge(state, fromWire(row.delta));
+    uptoSeq = row.seq;
+  }
+  return { state, uptoSeq };
 }
 
 /**
@@ -68,8 +110,17 @@ export async function replay(_db: Db, _boardId: string): Promise<ReplayResult> {
  * состояния журнала `materialize` этого результата равен `materialize`
  * полного `replay`.
  */
-export async function replayFromSnapshot(_db: Db, _boardId: string): Promise<ReplayResult> {
-  throw new Error("replayFromSnapshot: not implemented");
+export async function replayFromSnapshot(db: Db, boardId: string): Promise<ReplayResult> {
+  const snapshot = await loadLatestSnapshot(db, boardId);
+  const tail = await opsSince(db, boardId, snapshot?.uptoSeq ?? 0);
+
+  let state = snapshot?.state ?? empty();
+  let uptoSeq = snapshot?.uptoSeq ?? 0;
+  for (const row of tail) {
+    state = merge(state, fromWire(row.delta));
+    uptoSeq = row.seq;
+  }
+  return { state, uptoSeq };
 }
 
 export interface SnapshotResult {
@@ -78,19 +129,23 @@ export interface SnapshotResult {
 }
 
 /** `null` — снапшотов для доски ещё нет. Среди нескольких строк — с максимальным `uptoSeq`. */
-export async function loadLatestSnapshot(
-  _db: Db,
-  _boardId: string,
-): Promise<SnapshotResult | null> {
-  throw new Error("loadLatestSnapshot: not implemented");
+export async function loadLatestSnapshot(db: Db, boardId: string): Promise<SnapshotResult | null> {
+  const [row] = await db
+    .select({ uptoSeq: snapshots.uptoSeq, state: snapshots.state })
+    .from(snapshots)
+    .where(eq(snapshots.boardId, boardId))
+    .orderBy(desc(snapshots.uptoSeq))
+    .limit(1);
+  if (!row) return null;
+  return { uptoSeq: row.uptoSeq, state: fromWire(row.state) };
 }
 
 /** Сохраняет `compact(state)` как снапшот на `uptoSeq`. Когда именно снимать снапшот — вне T-008 (эксплуатационная политика, не инвариант). */
 export async function saveSnapshot(
-  _db: Db,
-  _boardId: string,
-  _uptoSeq: number,
-  _state: State,
+  db: Db,
+  boardId: string,
+  uptoSeq: number,
+  state: State,
 ): Promise<void> {
-  throw new Error("saveSnapshot: not implemented");
+  await db.insert(snapshots).values({ boardId, uptoSeq, state: toWire(compactState(state)) });
 }

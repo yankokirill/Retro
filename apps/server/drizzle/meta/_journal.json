@@ -43,6 +43,13 @@
       "when": 1789379336281,
       "tag": "0005_silky_arclight",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1789379968950,
+      "tag": "0006_whole_hydra",
+      "breakpoints": true
     }
   ]
 }

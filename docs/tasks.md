@@ -92,11 +92,12 @@
 ### T-008: Журнал операций и снапшоты
 
 - **REQ:** REQ-023 (кр. 3), REQ-027
-- **Статус:** todo
+- **Статус:** done — ветка `feat/T-008-oplog-snapshots`
 - **Размер:** M
 - **Зависит от:** T-004
 - **Затрагивает:** apps/server (таблицы ops, snapshots, миграция)
 - **Готово, когда:** запись идемпотентна по `(board, actor, counter)`; replay против снапшота (I5) на Postgres в Testcontainers
+- **Примечание:** `lamport`/`actor`/`counter` в `ops` — nullable (`vote`/`unvote` не несут метки; `unvote` не несёт и своего dot — см. открытый вопрос у T-010). `ops.actor` — `text`, не `uuid` (ActorId в `packages/crdt` формата не имеет, проверка формата — граница протокола, не хранилище).
 
 ### T-009: WebSocket-синхронизация
 

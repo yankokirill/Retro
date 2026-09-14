@@ -95,7 +95,13 @@ export const ops = pgTable(
     boardId: uuid("board_id")
       .notNull()
       .references(() => boards.id),
-    actor: uuid("actor"),
+    // text, не uuid: ActorId в packages/crdt — непрозрачная строка без
+    // формата (CLAUDE.md правило 7, пакет "чистый"); реальные клиенты шлют
+    // UUID (protocol.md § 2), но это проверяется на границе протокола
+    // (V1-V5, T-010), не здесь. Тестовые сценарии (packages/crdt/test/
+    // arbitraries.ts, переиспользуемые test-author) используют
+    // человекочитаемые id вида "actor-1" — uuid здесь их бы отверг.
+    actor: text("actor"),
     counter: integer("counter"),
     lamport: integer("lamport"),
     delta: jsonb("delta").$type<WireDelta>().notNull(),
