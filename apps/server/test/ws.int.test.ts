@@ -14,7 +14,8 @@
 // (кроме `app.ts`/`boards/service.ts`, чей контракт дан в задаче verbatim) и
 // `packages/crdt/src/ops/**` не читались.
 
-import { createSticker, empty, newClock, toWire } from "@retro/crdt";
+import type { EntityId } from "@retro/crdt";
+import { createSticker, empty, newClock, setColor, toWire } from "@retro/crdt";
 import type { ServerMessage } from "@retro/protocol";
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from "@testcontainers/postgresql";
 import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
@@ -261,5 +262,58 @@ describe("REQ-002: hello постороннего guestId отклоняется
       setTimeout(resolve, 2000);
     });
     expect(closed).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// REQ-024 — правило приёма V3 сквозь весь пайплайн: семантически некорректная
+// операция (правка несуществующей сущности) возвращается автору как `reject`
+// с reason "unknown_target" по настоящему WS-соединению, а не просто из
+// чистой функции `validateOp` (это уже покрыто validate.test.ts). Отклонённая
+// операция не должна портить остальную сессию соединения (REQ-024 кр. 1).
+// ---------------------------------------------------------------------------
+
+describe("REQ-024: reject доходит до клиента по WS и не ломает соединение", () => {
+  it("REQ-024: write в несуществующую сущность получает reject с reason unknown_target и тем же dot", async () => {
+    const { boardId, ownerId } = await newBoardWithOwner();
+    const ws = await connect(boardId);
+    const reader = messageReader(ws);
+
+    const actorId = newActorId();
+    sendHello(ws, { guestId: ownerId, displayName: "Owner", actorId });
+    const welcome = await reader.next();
+    expect(welcome.type).toBe("welcome");
+
+    // Дельта формально валидна (одна операция, значение в домене поля), но
+    // ссылается на сущность, которой нет ни в снапшоте, ни в этой же дельте.
+    const missing = `${crypto.randomUUID()}:1` as EntityId;
+    const edit = setColor(empty(), newClock(actorId), missing, "green");
+    const wireDelta = toWire(edit.delta);
+
+    ws.send(JSON.stringify({ type: "op", delta: wireDelta }));
+
+    const rejected = await reader.next();
+    expect(rejected.type).toBe("reject");
+    if (rejected.type !== "reject") throw new Error("expected reject");
+    expect(rejected.dot).toEqual(edit.dot);
+    expect(rejected.reason).toBe("unknown_target");
+    expect(rejected.message.length).toBeGreaterThan(0);
+
+    // Соединение остаётся рабочим: следующая, уже корректная операция
+    // принимается как обычно.
+    const created = createSticker(empty(), newClock(actorId), {
+      column: "start",
+      frac: "1",
+      text: "still alive after reject",
+      color: "yellow",
+    });
+    ws.send(JSON.stringify({ type: "op", delta: toWire(created.delta) }));
+
+    const ack = await reader.next();
+    expect(ack.type).toBe("ack");
+    if (ack.type !== "ack") throw new Error("expected ack");
+    expect(ack.dot).toEqual(created.dot);
+
+    ws.close();
   });
 });
