@@ -121,7 +121,7 @@
 | Метод и путь | Тело / ответ | Кто | REQ |
 |---|---|---|---|
 | `POST /api/boards` | `{ title, displayName, voteLimit? }` → `201 { boardId, participantLink, viewerLink }`; создатель сразу `owner`, ссылки — для остальных (ADR-0007) | любой гость | REQ-001 |
-| `GET /api/boards/join/:linkToken` | → `200 { boardId, role }`; первый заход `guestId` по этому токену создаёт запись в `members` с этой ролью, повторный — возвращает уже сохранённую роль без изменений (REQ-002, кр. 5–7) | любой | REQ-002 |
+| `GET /api/boards/join/:linkToken?displayName=` | → `200 { boardId, role }`; `displayName` — обязательный query-параметр (у GET нет тела, отсюда query, а не body; клиент отправляет своё уже известное отображаемое имя, REQ-002 кр.1). Первый заход `guestId` по этому токену создаёт запись в `members` с этой ролью и этим именем; повторный — возвращает уже сохранённую роль без изменений, присланное имя функционально игнорируется | любой | REQ-002 |
 | `GET /api/boards/:boardId` | → `200 BoardMeta` без `authors` до `reveal`; `404`, если удалена **или** у `guestId` нет записи в `members`/он не `owner` (REQ-002, кр. 8 — не через `join`, доска не «нащупывается» по `boardId`) | участник доски | REQ-002 |
 | `GET /api/boards/:boardId/export` | → `200 { columns, actionItems }`; `409 not_revealed` до `reveal` | любая роль | REQ-020 |
 | `DELETE /api/boards/:boardId` | `{ confirm: boardId }` → `202`; `403` не владельцу | owner | REQ-021 |
