@@ -4,7 +4,9 @@
 // Валидация размеров и прав — не здесь, а в packages/protocol и на сервере.
 
 import type {
+  ActionView,
   ActorId,
+  CardView,
   Clock,
   Color,
   Column,
@@ -13,6 +15,8 @@ import type {
   Dot,
   EntityId,
   Entry,
+  GroupView,
+  Item,
   Key,
   Kind,
   OpResult,
@@ -23,6 +27,7 @@ import type {
   Unvote,
   UserId,
   Value,
+  View,
   Vote,
 } from "./types.js";
 
@@ -374,4 +379,170 @@ export function activeVotes(state: State, target?: EntityId): Vote[] {
     result.push(entry);
   }
   return result;
+}
+
+/**
+ * materialize: X → View (§ 4) — то, что видно на экране: чистая функция
+ * **множества** `state`, не порядка, в котором его собирали (I3).
+ *
+ * Ограничение M1: результат зависит от `state` только через `created`,
+ * функции `visible`/`winner`/`values` (vis_k/win_k/vals_k) и `activeVotes`
+ * (active(X)) — реализация не должна использовать ничего сверх этого
+ * (например, порядок вставки в исходные Map).
+ *
+ * Правила R1–R7 (§ 4):
+ * - R1: сущность видна, если `exists(id) ∧ ¬deleted(id)`; удалённая — в
+ *   `trash` (только sticker/group — action items в trash не попадают, у
+ *   них нет `place`, см. JSDoc `View` в types.ts). Записи ячеек без записи
+ *   в `created` игнорируются (операция создания ещё не пришла).
+ * - R2: `text`/`title` = vals_k, `conflict = text.length > 1`; `color` =
+ *   победитель по метке.
+ * - R3: эффективная группа стикера `g* = winner(id, "group").value`, если
+ *   она существует, это `group` и не удалена; иначе `none`.
+ * - R4: стикер с `g* = none` — в своей колонке по `place`; иначе — внутри
+ *   группы, свой `place` не используется.
+ * - R5: порядок внутри колонки/группы — по `(frac, id)` по возрастанию, при
+ *   равных `frac` решает порядок `Dot` (`dotKey`).
+ * - R6: `votes(id) = |{v ∈ activeVotes(state) | v.target === id}|`; голоса
+ *   за удалённый стикер не показываются (удалённый стикер не попадает в
+ *   `CardView`), но остаются в `activeVotes`.
+ * - R7: `trash` и `actions` отсортированы по `id`.
+ */
+/** Dot, закодированный в EntityId (§ 1.4: id сущности = dotKey dot её создания). */
+function entityDot(id: EntityId): Dot {
+  const separator = id.lastIndexOf(":");
+  return { actor: id.slice(0, separator), counter: Number(id.slice(separator + 1)) };
+}
+
+/** R5: порядок по (frac, id) по возрастанию, тай-брейк по Dot (§ 1.2). */
+function compareOrder(
+  a: { frac: string; id: EntityId },
+  b: { frac: string; id: EntityId },
+): number {
+  if (a.frac !== b.frac) return a.frac < b.frac ? -1 : 1;
+  return compareDots(entityDot(a.id), entityDot(b.id));
+}
+
+function textValues(state: State, id: EntityId, field: "text" | "title"): string[] {
+  return values(state, { entity: id, field }) as string[];
+}
+
+export function materialize(state: State): View {
+  const kindOf = new Map<EntityId, Kind>();
+  for (const created of state.created.values()) kindOf.set(created.id, created.kind);
+
+  const isDeleted = (id: EntityId): boolean =>
+    winner(state, { entity: id, field: "deleted" })?.value === true;
+  const votesOf = (id: EntityId): number => activeVotes(state, id).length;
+
+  const trash: EntityId[] = [];
+  const actions: ActionView[] = [];
+  const groupMeta = new Map<
+    EntityId,
+    {
+      readonly title: string[];
+      readonly conflict: boolean;
+      readonly votes: number;
+      readonly place: Place;
+    }
+  >();
+  const stickers: Array<{ card: CardView; place: Place; effectiveGroup: EntityId | null }> = [];
+
+  for (const created of state.created.values()) {
+    const { id, kind } = created;
+
+    if (kind === "action") {
+      if (isDeleted(id)) continue; // R1: удалённый action item — не в actions и не в trash (см. JSDoc View)
+      const text = textValues(state, id, "text");
+      const assignee = (winner(state, { entity: id, field: "assignee" })?.value ??
+        null) as UserId | null;
+      const done = winner(state, { entity: id, field: "done" })?.value === true;
+      actions.push({ id, text, conflict: text.length > 1, assignee, done });
+      continue;
+    }
+
+    if (isDeleted(id)) {
+      trash.push(id);
+      continue;
+    }
+
+    const place = winner(state, { entity: id, field: "place" })?.value as Place;
+
+    if (kind === "group") {
+      const title = textValues(state, id, "title");
+      groupMeta.set(id, { title, conflict: title.length > 1, votes: votesOf(id), place });
+      continue;
+    }
+
+    const text = textValues(state, id, "text");
+    const color = winner(state, { entity: id, field: "color" })?.value as Color;
+    const card: CardView = { id, text, conflict: text.length > 1, color, votes: votesOf(id) };
+
+    const groupField = winner(state, { entity: id, field: "group" })?.value as
+      | EntityId
+      | null
+      | undefined;
+    // R3: эффективная группа — только существующая, невыудалённая сущность вида group.
+    const effectiveGroup =
+      groupField != null && kindOf.get(groupField) === "group" && !isDeleted(groupField)
+        ? groupField
+        : null;
+
+    stickers.push({ card, place, effectiveGroup });
+  }
+
+  const groupCards = new Map<EntityId, Array<{ card: CardView; place: Place }>>();
+  const topLevel: Array<{ item: Item; place: Place }> = [];
+
+  for (const sticker of stickers) {
+    if (sticker.effectiveGroup !== null) {
+      const list = groupCards.get(sticker.effectiveGroup) ?? [];
+      list.push({ card: sticker.card, place: sticker.place });
+      groupCards.set(sticker.effectiveGroup, list);
+    } else {
+      topLevel.push({ item: sticker.card, place: sticker.place });
+    }
+  }
+
+  for (const [id, meta] of groupMeta) {
+    const cards = (groupCards.get(id) ?? [])
+      .sort((a, b) =>
+        compareOrder({ frac: a.place.frac, id: a.card.id }, { frac: b.place.frac, id: b.card.id }),
+      )
+      .map((entry) => entry.card);
+    const group: GroupView = {
+      id,
+      title: meta.title,
+      conflict: meta.conflict,
+      votes: meta.votes,
+      cards,
+    };
+    topLevel.push({ item: group, place: meta.place });
+  }
+
+  const buckets = new Map<Column, Array<{ item: Item; place: Place }>>();
+  for (const column of ["start", "stop", "continue"] as const) buckets.set(column, []);
+  for (const placed of topLevel) {
+    buckets.get(placed.place.column)?.push(placed);
+  }
+
+  const columns = new Map<Column, Item[]>();
+  for (const [column, placed] of buckets) {
+    columns.set(
+      column,
+      [...placed]
+        .sort((a, b) =>
+          compareOrder(
+            { frac: a.place.frac, id: a.item.id },
+            { frac: b.place.frac, id: b.item.id },
+          ),
+        )
+        .map((entry) => entry.item),
+    );
+  }
+
+  trash.sort();
+  actions.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+
+  return { columns, trash, actions };
 }
