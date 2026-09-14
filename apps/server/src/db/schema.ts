@@ -66,14 +66,27 @@ export const members = pgTable(
  * Журнал принятых операций (T-008, REQ-023 кр.3, REQ-027; § 6
  * `consistency-model.md`). `seq` — общий по всем доскам bigserial: клиент
  * сравнивает его только в пределах своей доски (`protocol.md` § 5–6), гэпы от
- * других досок не мешают. `UNIQUE(board_id, actor, counter)` — идемпотентность
- * приёма: повторно отправленная операция (тот же dot) не создаёт вторую
- * строку (V1, REQ-023 кр.3). `delta` — ровно то, что несла одна операция
+ * других досок не мешают. `delta` — ровно то, что несла одна операция
  * (`WireDelta` из `@retro/crdt`, § 3 protocol.md), без отдельной метки типа
  * операции — в протоколе её нет (см. правку `CLAUDE.md` § 3 при T-008).
- * `lamport` — **nullable**: у `vote`/`unvote` в § 3.1 своей метки нет
- * (2P-set, не поле-регистр), только `dot`; для create/write-операций
- * заполняется меткой её единственной/общей записи.
+ *
+ * `actor`/`counter`/`lamport` — **nullable**, и это не одна и та же причина:
+ * `lamport` отсутствует у `vote`/`unvote` (§ 3.1 — 2P-set, метки не бывает
+ * вообще). `actor`/`counter` дополнительно отсутствуют именно у `unvote`:
+ * в отличие от остальных операций, `Unvote.dot` в CRDT-модели — это dot
+ * **отзываемого голоса**, а не свежий dot самой операции отзыва (T-002,
+ * `packages/crdt/src/index.ts`: `unvote` намеренно не тикает часы). Поэтому
+ * `(board_id, actor, counter)` как ключ идемпотентности к unvote не
+ * применим — пара `(actor, counter)` уже занята исходной операцией `vote`.
+ * `UNIQUE(board_id, actor, counter)` — идемпотентность приёма для операций,
+ * у которых dot есть (V1, REQ-023 кр.3): повтор не создаёт вторую строку.
+ * Postgres не считает NULL равным NULL в UNIQUE, поэтому строки `unvote`
+ * (actor=counter=NULL) в это ограничение не попадают — повторная отправка
+ * одного и того же unvote может завести лишнюю строку, но это безопасно:
+ * merge по нему идемпотентен на уровне состояния (I2.5, REQ-023 кр.3 держится
+ * для итогового состояния, а не для количества строк в журнале). Полная
+ * защита от дублирования unvote на уровне протокола — вопрос V1 для T-010,
+ * не решается здесь.
  */
 export const ops = pgTable(
   "ops",
@@ -82,8 +95,8 @@ export const ops = pgTable(
     boardId: uuid("board_id")
       .notNull()
       .references(() => boards.id),
-    actor: uuid("actor").notNull(),
-    counter: integer("counter").notNull(),
+    actor: uuid("actor"),
+    counter: integer("counter"),
     lamport: integer("lamport"),
     delta: jsonb("delta").$type<WireDelta>().notNull(),
     receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),

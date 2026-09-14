@@ -9,7 +9,14 @@ export type Db = NodePgDatabase<typeof schema>;
 
 export interface AppendOpParams {
   readonly boardId: string;
-  readonly dot: Dot;
+  /**
+   * `null` — только для `unvote`: `Unvote.dot` в CRDT-модели (T-002) — dot
+   * **отзываемого голоса**, не свежий dot самой операции отзыва (`unvote`
+   * не тикает часы), поэтому у него нет собственной пары `(actor, counter)`
+   * для идемпотентности на уровне журнала (см. JSDoc `ops` в `db/schema.ts`).
+   * Для всех остальных операций (create/write/vote) — их собственный dot.
+   */
+  readonly dot: Dot | null;
   /** `null` — у `vote`/`unvote` метки нет (§ 3.1, 2P-set); для остальных операций — метка её записи. */
   readonly lamport: number | null;
   /** Ровно то, что несла одна операция (§ 3 `protocol.md`) — уже в проводном формате. */
@@ -21,10 +28,15 @@ export interface AppendOpResult {
 }
 
 /**
- * REQ-023 (кр. 3). Идемпотентно по `(boardId, dot.actor, dot.counter)`:
- * повторно отправленная операция (тот же dot — переподключение, дубль
- * доставки) не создаёт вторую строку и не меняет уже присвоенный `seq` —
- * возвращает его.
+ * REQ-023 (кр. 3). Для `dot !== null` — идемпотентно по
+ * `(boardId, dot.actor, dot.counter)`: повторно отправленная операция (тот
+ * же dot — переподключение, дубль доставки) не создаёт вторую строку,
+ * возвращает уже присвоенный `seq`. Для `dot === null` (только `unvote`,
+ * см. JSDoc `AppendOpParams.dot`) дедупликации на уровне строк журнала нет
+ * — каждый вызов добавляет строку; итоговое материализованное состояние
+ * при этом не меняется от повтора (merge идемпотентен, I2.5), только объём
+ * журнала может немного вырасти — полная защита от дублей unvote на уровне
+ * протокола остаётся за V1 в T-010.
  */
 export async function appendOp(_db: Db, _params: AppendOpParams): Promise<AppendOpResult> {
   throw new Error("appendOp: not implemented");
