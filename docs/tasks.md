@@ -125,7 +125,7 @@
 ### T-011: Права и фазы (V6)
 
 - **REQ:** REQ-004 (кр. 2, 4), REQ-005 (кр. 2–3), REQ-007 (кр. 3), REQ-009 (роли), REQ-011 (роли), REQ-017 (роли)
-- **Статус:** done — ветка `feat/T-011-roles-phases`
+- **Статус:** done — ветка `feat/T-011-roles-phases`, смёржена в `main` (PR #13, `c03604c`)
 - **Размер:** M
 - **Зависит от:** T-010
 - **Затрагивает:** apps/server, docs/security/permissions.md
