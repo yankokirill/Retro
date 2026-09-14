@@ -29,6 +29,7 @@ import type {
   Value,
   View,
   Vote,
+  WireDelta,
 } from "./types.js";
 
 export type * from "./types.js";
@@ -545,4 +546,76 @@ export function materialize(state: State): View {
   actions.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 
   return { columns, trash, actions };
+}
+
+/**
+ * compact(X) — § 6: выбрасывает из `state` только перекрытые записи (те, чей
+ * `(key, dot)` уже встречается в `supersedes`) и отозванные голоса (те, чей
+ * `(dot, target)` уже встречается в `unvotes`). `created`, `supersedes`,
+ * `unvotes` не меняются — они маленькие (пары идентификаторов) и нужны,
+ * чтобы поздно пришедшая старая запись/голос всё равно остались невидимы.
+ *
+ * I4 (§ 8): для любого достижимого `state` и любого `y`,
+ * `materialize(compact(state) ⊔ y) = materialize(state ⊔ y)`.
+ */
+export function compact(state: State): State {
+  const entries = new Map<string, Entry>();
+  for (const [key, entry] of state.entries) {
+    if (state.supersedes.has(cellDotIdentity(entry.key, entry.dot))) continue;
+    entries.set(key, entry);
+  }
+
+  const votes = new Map<string, Vote>();
+  for (const [key, vote] of state.votes) {
+    if (state.unvotes.has(identity(vote.dot.actor, vote.dot.counter, vote.target))) continue;
+    votes.set(key, vote);
+  }
+
+  return {
+    created: state.created,
+    entries,
+    supersedes: state.supersedes,
+    votes,
+    unvotes: state.unvotes,
+  };
+}
+
+/**
+ * toWire(X): `State` (пять `Map`) → `WireDelta` (пять массивов, порядок не
+ * значим) — проводной формат из `packages/protocol` (`wireDeltaSchema`).
+ * Чистая проекция значений `Map`, без изменения их состава.
+ */
+export function toWire(state: State): WireDelta {
+  return {
+    created: [...state.created.values()],
+    entries: [...state.entries.values()],
+    supersedes: [...state.supersedes.values()],
+    votes: [...state.votes.values()],
+    unvotes: [...state.unvotes.values()],
+  };
+}
+
+/**
+ * fromWire(w): обратное `toWire` — `WireDelta` → `State`. Для любого
+ * достижимого `state`, `equals(fromWire(toWire(state)), state)` (сравнение
+ * как множеств, не порядка) — `toWire`/`fromWire` не теряют и не добавляют
+ * элементы.
+ */
+export function fromWire(wire: WireDelta): State {
+  const created = new Map<string, Created>();
+  for (const c of wire.created) created.set(identity(c.id), c);
+
+  const entries = new Map<string, Entry>();
+  for (const e of wire.entries) entries.set(cellDotIdentity(e.key, e.dot), e);
+
+  const supersedes = new Map<string, Supersede>();
+  for (const s of wire.supersedes) supersedes.set(cellDotIdentity(s.key, s.dot), s);
+
+  const votes = new Map<string, Vote>();
+  for (const v of wire.votes) votes.set(identity(v.dot.actor, v.dot.counter), v);
+
+  const unvotes = new Map<string, Unvote>();
+  for (const u of wire.unvotes) unvotes.set(identity(u.dot.actor, u.dot.counter, u.target), u);
+
+  return { created, entries, supersedes, votes, unvotes };
 }
