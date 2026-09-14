@@ -17,6 +17,9 @@ export const actorIdSchema = z.uuid();
 export const guestIdSchema = z.uuid();
 export const boardIdSchema = z.uuid();
 
+/** Ссылка-приглашение на роль participant/viewer (ADR-0007). */
+export const linkTokenSchema = z.uuid();
+
 /** `${actorId}:${counter}` — dot операции создания сущности. */
 export const entityIdSchema = z.string().regex(/^[0-9a-fA-F-]{36}:[1-9]\d*$/);
 

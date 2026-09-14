@@ -1,5 +1,6 @@
 // REST API — docs/spec/protocol.md § 7.
 import { z } from "zod";
+import { boardMetaSchema, roleSchema } from "./messages.js";
 import {
   boardIdSchema,
   columnSchema,
@@ -7,6 +8,7 @@ import {
   entityIdSchema,
   guestIdSchema,
   LIMITS,
+  linkTokenSchema,
   titleSchema,
 } from "./wire.js";
 
@@ -18,7 +20,21 @@ export const createBoardRequestSchema = z.object({
   voteLimit: z.number().int().min(LIMITS.voteLimit.min).max(LIMITS.voteLimit.max).optional(),
 });
 
-export const createBoardResponseSchema = z.object({ boardId: boardIdSchema });
+/** ADR-0007: создатель — сразу owner, остальные роли — по одной из двух ссылок. */
+export const createBoardResponseSchema = z.object({
+  boardId: boardIdSchema,
+  participantLink: linkTokenSchema,
+  viewerLink: linkTokenSchema,
+});
+
+/** `GET /api/boards/join/:linkToken` (ADR-0007, REQ-002 кр. 5–7). */
+export const joinBoardResponseSchema = z.object({
+  boardId: boardIdSchema,
+  role: roleSchema,
+});
+
+/** `GET /api/boards/:boardId` — `BoardMeta` + собственная роль запросившего (не часть `meta`, см. `welcome` в § 5). */
+export const getBoardResponseSchema = boardMetaSchema.extend({ role: roleSchema });
 
 export const deleteBoardRequestSchema = z.object({ confirm: boardIdSchema });
 
@@ -59,6 +75,8 @@ export const errorResponseSchema = z.object({ error: z.string(), message: z.stri
 
 export type CreateBoardRequest = z.infer<typeof createBoardRequestSchema>;
 export type CreateBoardResponse = z.infer<typeof createBoardResponseSchema>;
+export type JoinBoardResponse = z.infer<typeof joinBoardResponseSchema>;
+export type GetBoardResponse = z.infer<typeof getBoardResponseSchema>;
 export type DeleteBoardRequest = z.infer<typeof deleteBoardRequestSchema>;
 export type ExportResponse = z.infer<typeof exportResponseSchema>;
 export type ErrorResponse = z.infer<typeof errorResponseSchema>;
