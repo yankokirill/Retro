@@ -558,8 +558,26 @@ export function materialize(state: State): View {
  * I4 (§ 8): для любого достижимого `state` и любого `y`,
  * `materialize(compact(state) ⊔ y) = materialize(state ⊔ y)`.
  */
-export function compact(_state: State): State {
-  throw new Error("compact: not implemented");
+export function compact(state: State): State {
+  const entries = new Map<string, Entry>();
+  for (const [key, entry] of state.entries) {
+    if (state.supersedes.has(cellDotIdentity(entry.key, entry.dot))) continue;
+    entries.set(key, entry);
+  }
+
+  const votes = new Map<string, Vote>();
+  for (const [key, vote] of state.votes) {
+    if (state.unvotes.has(identity(vote.dot.actor, vote.dot.counter, vote.target))) continue;
+    votes.set(key, vote);
+  }
+
+  return {
+    created: state.created,
+    entries,
+    supersedes: state.supersedes,
+    votes,
+    unvotes: state.unvotes,
+  };
 }
 
 /**
@@ -567,8 +585,14 @@ export function compact(_state: State): State {
  * значим) — проводной формат из `packages/protocol` (`wireDeltaSchema`).
  * Чистая проекция значений `Map`, без изменения их состава.
  */
-export function toWire(_state: State): WireDelta {
-  throw new Error("toWire: not implemented");
+export function toWire(state: State): WireDelta {
+  return {
+    created: [...state.created.values()],
+    entries: [...state.entries.values()],
+    supersedes: [...state.supersedes.values()],
+    votes: [...state.votes.values()],
+    unvotes: [...state.unvotes.values()],
+  };
 }
 
 /**
@@ -577,6 +601,21 @@ export function toWire(_state: State): WireDelta {
  * как множеств, не порядка) — `toWire`/`fromWire` не теряют и не добавляют
  * элементы.
  */
-export function fromWire(_wire: WireDelta): State {
-  throw new Error("fromWire: not implemented");
+export function fromWire(wire: WireDelta): State {
+  const created = new Map<string, Created>();
+  for (const c of wire.created) created.set(identity(c.id), c);
+
+  const entries = new Map<string, Entry>();
+  for (const e of wire.entries) entries.set(cellDotIdentity(e.key, e.dot), e);
+
+  const supersedes = new Map<string, Supersede>();
+  for (const s of wire.supersedes) supersedes.set(cellDotIdentity(s.key, s.dot), s);
+
+  const votes = new Map<string, Vote>();
+  for (const v of wire.votes) votes.set(identity(v.dot.actor, v.dot.counter), v);
+
+  const unvotes = new Map<string, Unvote>();
+  for (const u of wire.unvotes) unvotes.set(identity(u.dot.actor, u.dot.counter, u.target), u);
+
+  return { created, entries, supersedes, votes, unvotes };
 }
