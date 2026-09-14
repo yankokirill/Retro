@@ -415,7 +415,10 @@ function entityDot(id: EntityId): Dot {
 }
 
 /** R5: порядок по (frac, id) по возрастанию, тай-брейк по Dot (§ 1.2). */
-function compareOrder(a: { frac: string; id: EntityId }, b: { frac: string; id: EntityId }): number {
+function compareOrder(
+  a: { frac: string; id: EntityId },
+  b: { frac: string; id: EntityId },
+): number {
   if (a.frac !== b.frac) return a.frac < b.frac ? -1 : 1;
   return compareDots(entityDot(a.id), entityDot(b.id));
 }
@@ -436,7 +439,12 @@ export function materialize(state: State): View {
   const actions: ActionView[] = [];
   const groupMeta = new Map<
     EntityId,
-    { readonly title: string[]; readonly conflict: boolean; readonly votes: number; readonly place: Place }
+    {
+      readonly title: string[];
+      readonly conflict: boolean;
+      readonly votes: number;
+      readonly place: Place;
+    }
   >();
   const stickers: Array<{ card: CardView; place: Place; effectiveGroup: EntityId | null }> = [];
 
@@ -446,9 +454,8 @@ export function materialize(state: State): View {
     if (kind === "action") {
       if (isDeleted(id)) continue; // R1: удалённый action item — не в actions и не в trash (см. JSDoc View)
       const text = textValues(state, id, "text");
-      const assignee = (winner(state, { entity: id, field: "assignee" })?.value ?? null) as
-        | UserId
-        | null;
+      const assignee = (winner(state, { entity: id, field: "assignee" })?.value ??
+        null) as UserId | null;
       const done = winner(state, { entity: id, field: "done" })?.value === true;
       actions.push({ id, text, conflict: text.length > 1, assignee, done });
       continue;
@@ -499,7 +506,9 @@ export function materialize(state: State): View {
 
   for (const [id, meta] of groupMeta) {
     const cards = (groupCards.get(id) ?? [])
-      .sort((a, b) => compareOrder({ frac: a.place.frac, id: a.card.id }, { frac: b.place.frac, id: b.card.id }))
+      .sort((a, b) =>
+        compareOrder({ frac: a.place.frac, id: a.card.id }, { frac: b.place.frac, id: b.card.id }),
+      )
       .map((entry) => entry.card);
     const group: GroupView = {
       id,
@@ -522,7 +531,12 @@ export function materialize(state: State): View {
     columns.set(
       column,
       [...placed]
-        .sort((a, b) => compareOrder({ frac: a.place.frac, id: a.item.id }, { frac: b.place.frac, id: b.item.id }))
+        .sort((a, b) =>
+          compareOrder(
+            { frac: a.place.frac, id: a.item.id },
+            { frac: b.place.frac, id: b.item.id },
+          ),
+        )
         .map((entry) => entry.item),
     );
   }
