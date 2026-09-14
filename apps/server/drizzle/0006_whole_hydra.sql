@@ -1,0 +1,1 @@
+ALTER TABLE "ops" ALTER COLUMN "actor" SET DATA TYPE text;
