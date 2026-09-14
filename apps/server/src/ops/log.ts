@@ -73,6 +73,54 @@ export async function appendOp(db: Db, params: AppendOpParams): Promise<AppendOp
   return { seq: existing.seq };
 }
 
+export interface FoundOp {
+  readonly seq: number;
+}
+
+/**
+ * T-010, V1 («свежий dot»): строка журнала с этим `(boardId, actor, counter)`,
+ * если уже принималась — тогда это повтор (переподключение, дубль доставки):
+ * `ack` с её `seq`, без повторной валидации и без вызова `appendOp`. `null`,
+ * если такой строки нет (операция либо свежая, либо устаревшая — решает V1).
+ * Не применяется к `unvote` (`AppendOpParams.dot` для него `null` — у него
+ * нет собственной пары `(actor, counter)`, см. JSDoc там); эту проверку
+ * вызывающий код (`ws/gateway.ts`) для `unvote` не делает вовсе.
+ */
+export async function findOp(
+  db: Db,
+  boardId: string,
+  actor: string,
+  counter: number,
+): Promise<FoundOp | null> {
+  const [row] = await db
+    .select({ seq: ops.seq })
+    .from(ops)
+    .where(and(eq(ops.boardId, boardId), eq(ops.actor, actor), eq(ops.counter, counter)));
+  return row ?? null;
+}
+
+export interface ActorClock {
+  /** `last_n(a)` (V1): наибольший `counter`, принятый для этого актора на этой доске; 0, если ни одного. */
+  readonly lastCounter: number;
+  /** `last_L(a)` (V5): наибольшая метка `lamport`, принятая для этого актора; 0, если ни одной (у vote/unvote её нет). */
+  readonly lastLamport: number;
+  /** `L_S` (V5): наибольшая метка `lamport`, принятая на доске вообще (любым актором); 0, если ни одной. */
+  readonly boardMaxLamport: number;
+}
+
+/**
+ * T-010, V1+V5. Три числа для проверки свежести dot и метки нового
+ * `create`/`write`/`vote`; для `vote` `lastLamport`/`boardMaxLamport` не
+ * нужны (у vote нет метки), но вычисляются тем же запросом — дешевле, чем
+ * два отдельных похода в БД. Источник истины — журнал `ops` (не
+ * `packages/crdt`-состояние): после компактизации проигравшая запись
+ * актора может выпасть из `state.entries`, и метка по состоянию
+ * недосчиталась бы — журнал строк не теряет никогда.
+ */
+export async function actorClock(db: Db, boardId: string, actor: string): Promise<ActorClock> {
+  throw new Error("actorClock: not implemented");
+}
+
 export interface OpRow {
   readonly seq: number;
   readonly delta: WireDelta;

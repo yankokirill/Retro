@@ -1,12 +1,10 @@
 // T-009 — WS-синхронизация: hello/welcome/op/ack/broadcast (protocol.md § 4–6,
-// REQ-022, REQ-023 кр. 3).
+// REQ-022, REQ-023 кр. 3). T-010 добавил проверку V1/V3/V4/V5 (ops/validate.js)
+// перед приёмом операции.
 //
-// Права, фазы, лимит голосов и правила приёма V1–V5 (свежий dot, метка,
-// перекрытие, ...) — вне этой задачи (T-010, T-011, T-012): пока сервер
-// принимает любую дельту, прошедшую zod-схему `clientDeltaSchema`, и не
-// проверяет, что `delta`-dot принадлежит актору, назвавшемуся в `hello`
-// (owner(a) = u из V1) — это заявлено как открытый вопрос для T-010, не
-// решается здесь молча.
+// Права, фазы, лимит голосов (V6, V7) — T-011, T-012, не здесь: сервер пока
+// принимает любую операцию, прошедшую V1/V3/V4/V5, независимо от роли,
+// фазы доски и лимита голосов.
 import {
   type BoardMeta,
   clientMessageSchema,
@@ -19,7 +17,15 @@ import {
 import type { FastifyInstance } from "fastify";
 import type { RawData } from "ws";
 import * as boardsService from "../boards/service.js";
-import { appendOp, type Db, welcomeData } from "../ops/log.js";
+import {
+  actorClock,
+  appendOp,
+  type Db,
+  findOp,
+  replayFromSnapshot,
+  welcomeData,
+} from "../ops/log.js";
+import { validateOp } from "../ops/validate.js";
 import { BoardHub, type Subscriber } from "./board-hub.js";
 import { computeVoterToken } from "./voter-token.js";
 
@@ -122,6 +128,37 @@ export function registerBoardWebSocket(app: FastifyInstance, deps: WsGatewayDeps
           const dot = operationDot(message.delta);
           const lamport = operationLamport(message.delta);
           const isUnvote = message.delta.unvotes.length > 0;
+
+          // V1: точное совпадение (actor, counter) в журнале — повтор
+          // (переподключение, дубль доставки), не новая операция: ack без
+          // повторной валидации. Не применяется к unvote — у него нет
+          // собственной пары (actor, counter), см. JSDoc AppendOpParams.dot.
+          if (!isUnvote) {
+            const existing = await findOp(deps.db, boardId, dot.actor, dot.counter);
+            if (existing) {
+              send(socket, { type: "ack", dot, seq: existing.seq });
+              return;
+            }
+          }
+
+          const { state } = await replayFromSnapshot(deps.db, boardId);
+          const clock = isUnvote ? null : await actorClock(deps.db, boardId, dot.actor);
+          const validation = validateOp({
+            state,
+            connectionActorId: subscriber.actorId,
+            delta: message.delta,
+            actorClock: clock,
+          });
+          if (!validation.ok) {
+            send(socket, {
+              type: "reject",
+              dot,
+              reason: validation.reason,
+              message: validation.message,
+            });
+            return;
+          }
+
           const { seq } = await appendOp(deps.db, {
             boardId,
             dot: isUnvote ? null : dot,

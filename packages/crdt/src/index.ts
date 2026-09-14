@@ -167,6 +167,31 @@ export function values(state: State, key: Key): Value[] {
   return visible(state, key).map((entry) => entry.value);
 }
 
+/**
+ * V3 (docs/spec/consistency-model.md § 7): вид сущности `id` в `C(X)`,
+ * `undefined` — сущности с таким id ещё нет. Сервер (T-010) использует это,
+ * чтобы отличить «правку существующей сущности» (id должен уже быть в C) от
+ * «создания» (id придёт в этой же дельте — проверять нечего).
+ */
+export function entityKind(state: State, id: EntityId): Kind | undefined {
+  return state.created.get(identity(id))?.kind;
+}
+
+/** V4: запись `e ∈ E(X)` с `e.k = key, e.d = dot`, если она ещё присутствует в состоянии. */
+export function entryAt(state: State, key: Key, dot: Dot): Entry | undefined {
+  return state.entries.get(cellDotIdentity(key, dot));
+}
+
+/**
+ * V4: пара `(key, dot)` уже отмечена как перекрытая в `S(X)`. Отдельно от
+ * `entryAt`, потому что после компактизации (§ 6) сама запись `e` могла
+ * быть удалена из `E`, а пара в `S` — нет (T5, `consistency-model.md`
+ * § 9): «уже перекрыта» проверяется этим, а не отсутствием `entryAt`.
+ */
+export function supersedeRecorded(state: State, key: Key, dot: Dot): boolean {
+  return state.supersedes.has(cellDotIdentity(key, dot));
+}
+
 function maxLamport(state: State): number {
   let max = 0;
   for (const entry of state.entries.values()) {
