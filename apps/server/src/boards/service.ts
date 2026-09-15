@@ -8,6 +8,7 @@ import { and, eq, isNull, or } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "../db/schema.js";
 import { boards, members } from "../db/schema.js";
+import { authorsDisplayNames } from "../ops/authors.js";
 
 export type Db = NodePgDatabase<typeof schema>;
 
@@ -136,8 +137,12 @@ export interface BoardForGuest {
  * REQ-002 (кр. 8). `null` — доска не существует, удалена, либо `guestId` не
  * `owner` и не встречается в `members` (не через `join` — доска не
  * «нащупывается» по голому `boardId`). REST-слой превращает `null` в `404`.
- * `revealed`/`timer`/`authors` — фиксированные значения до T-013 (фазы,
- * проекция видимости) ещё не реализованы.
+ * `revealed` (T-013, REQ-004 кр.1): доска раскрыта ⇔ текущая фаза не
+ * `collect` — тот же аргумент по индукции, что и `irreversible_phase` в
+ * `setPhase` ниже: вернуться в `collect` нельзя, значит любая другая фаза
+ * доказывает, что доска его уже покинула. `authors` — пусто до reveal
+ * (REQ-006), после — из `authorsDisplayNames` (T-013, `ops/authors.ts`).
+ * `timer` — фиксированное значение, вне T-013 (REQ-019, отдельная задача).
  */
 export async function getBoardForGuest(
   db: Db,
@@ -161,14 +166,16 @@ export async function getBoardForGuest(
     role = member.role as Role;
   }
 
+  const revealed = board.phase !== "collect";
+
   return {
     boardId: board.id,
     title: board.title,
     phase: board.phase,
-    revealed: false,
+    revealed,
     voteLimit: board.settings.voteLimit,
     timer: null,
-    authors: {},
+    authors: revealed ? await authorsDisplayNames(db, board.id) : {},
     role,
   };
 }

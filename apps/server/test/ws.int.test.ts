@@ -198,6 +198,17 @@ describe("REQ-022: сходимость независимо от порядка
     expect(welcomeOwner.type).toBe("welcome");
     expect(welcomeParticipant.type).toBe("welcome");
 
+    // T-013, REQ-006: в default-фазе collect чужой стикер скрыт — это не то,
+    // что здесь проверяется (см. отдельные тесты REQ-006 ниже). Уходим в
+    // group, чтобы эта операция была видна обоим и проверялся только сам
+    // факт сходимости (REQ-022), не видимость.
+    wsOwner.send(
+      JSON.stringify({ type: "command", id: "cmd-group", command: { type: "setPhase", phase: "group" } }),
+    );
+    // Порядок commandResult/meta для автора командой не фиксирован (см. REQ-004 тест выше).
+    await Promise.all([readerOwner.next(), readerOwner.next()]);
+    await nextOfType(readerParticipant, ["meta"]);
+
     // Владелец создаёт стикер — ровно одна CRDT-операция (§ 3 protocol.md).
     const created = createSticker(empty(), newClock(actorOwner), {
       column: "start",

@@ -53,4 +53,27 @@ export class BoardHub {
       if (subscriber !== except) this.send(subscriber, message);
     }
   }
+
+  /**
+   * T-013 (`proj_u`, REQ-006): как `broadcast`, но сообщение считается
+   * отдельно для каждого получателя — `build` возвращает `null`, если этому
+   * подписчику сейчас ничего не видно (тогда не шлём вообще ничего, а не
+   * пустую дельту, — сам факт сообщения не должен течь, CLAUDE.md § 5).
+   */
+  broadcastEach(
+    boardId: string,
+    except: Subscriber | undefined,
+    build: (subscriber: Subscriber) => ServerMessage | null,
+  ): void {
+    for (const subscriber of this.boards.get(boardId) ?? []) {
+      if (subscriber === except) continue;
+      const message = build(subscriber);
+      if (message) this.send(subscriber, message);
+    }
+  }
+
+  /** Подписчики доски прямо сейчас — снимок множества (T-013, reveal-досылка после смены фазы). */
+  subscribers(boardId: string): readonly Subscriber[] {
+    return [...(this.boards.get(boardId) ?? [])];
+  }
 }
