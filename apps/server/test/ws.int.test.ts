@@ -27,6 +27,7 @@ import {
 } from "@retro/crdt";
 import type { ServerMessage } from "@retro/protocol";
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from "@testcontainers/postgresql";
+import { eq } from "drizzle-orm";
 import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import type { FastifyInstance } from "fastify";
@@ -1250,5 +1251,192 @@ describe("REQ-023 (кр. 3), ADR-0008: идемпотентность unvote —
 
     wsOwner.close();
     wsParticipant.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Находка 6 code-review этого PR: resetVotes писал отзывы по одному вне
+// транзакции — сбой посередине (сеть/БД) оставлял доску с частично
+// отозванными голосами и без рассылки уже вставленных строк никому.
+// Исправлено (см. коммит): appendOp внутри resetVotes выполняется в одной
+// транзакции db.transaction(...), рассылка — только после успешного коммита.
+// Тест ниже подделывает сбой посередине через временный BEFORE INSERT
+// триггер Postgres на ops (никаких хуков в коде продукта, только в тесте) и
+// проверяет: транзакция целиком откатилась (ноль новых строк unvote в
+// журнале), ни один подписчик не получил рассылку ни для одного из голосов
+// (ни отравленного, ни соседнего) — проверяется контрольной операцией сразу
+// после неудачной попытки.
+// ---------------------------------------------------------------------------
+
+describe("REQ-016: массовый отзыв голосов атомарен — сбой посередине не оставляет доску наполовину сброшенной", () => {
+  it("resetVotes: сбой при вставке одного из двух отзывов откатывает оба, рассылки не было", async () => {
+    const { boardId, ownerId, participantLink } = await newBoardWithLinks(3);
+
+    // Owner создаёт два стикера и переводит доску в фазу vote (не переиспользуем
+    // ownerCreatesStickerAndEntersVotePhase — той нужен ровно один стикер).
+    const wsOwner = await connect(boardId);
+    const readerOwner = messageReader(wsOwner);
+    const ownerActorId = newActorId();
+    sendHello(wsOwner, { guestId: ownerId, displayName: "Owner", actorId: ownerActorId });
+    const welcomeOwner = await readerOwner.next();
+    expect(welcomeOwner.type).toBe("welcome");
+
+    const createdA = createSticker(empty(), newClock(ownerActorId), {
+      column: "start",
+      frac: "1",
+      text: "sticker A",
+      color: "yellow",
+    });
+    wsOwner.send(JSON.stringify({ type: "op", delta: toWire(createdA.delta) }));
+    expect((await readerOwner.next()).type).toBe("ack");
+    const stickerA = dotKey(createdA.dot) as EntityId;
+
+    const createdB = createSticker(empty(), createdA.clock, {
+      column: "start",
+      frac: "2",
+      text: "sticker B",
+      color: "blue",
+    });
+    wsOwner.send(JSON.stringify({ type: "op", delta: toWire(createdB.delta) }));
+    expect((await readerOwner.next()).type).toBe("ack");
+    const stickerB = dotKey(createdB.dot) as EntityId;
+
+    wsOwner.send(
+      JSON.stringify({
+        type: "command",
+        id: "cmd-enter-vote",
+        command: { type: "setPhase", phase: "vote" },
+      }),
+    );
+    // setPhase рассылает meta всем подписчикам (в т.ч. инициатору) отдельным
+    // сообщением от commandResult, порядок между ними не гарантирован —
+    // читаем и отбрасываем оба (как ownerCreatesStickerAndEntersVotePhase выше).
+    const enterVoteFirst = await readerOwner.next();
+    const enterVoteSecond = await readerOwner.next();
+    const enterVoteResult = [enterVoteFirst, enterVoteSecond].find(
+      (m) => m.type === "commandResult",
+    );
+    expect(enterVoteResult?.type).toBe("commandResult");
+    if (enterVoteResult?.type !== "commandResult") throw new Error("expected commandResult");
+    expect(enterVoteResult.ok).toBe(true);
+
+    // Два участника — каждый голосует за свой стикер.
+    const participant1 = newGuestId();
+    const participant2 = newGuestId();
+    await joinByLink(db, { linkToken: participantLink, guestId: participant1, displayName: "P1" });
+    await joinByLink(db, { linkToken: participantLink, guestId: participant2, displayName: "P2" });
+
+    const ws1 = await connect(boardId);
+    const ws2 = await connect(boardId);
+    const reader1 = messageReader(ws1);
+    const reader2 = messageReader(ws2);
+    const actor1 = newActorId();
+    const actor2 = newActorId();
+    sendHello(ws1, { guestId: participant1, displayName: "P1", actorId: actor1 });
+    sendHello(ws2, { guestId: participant2, displayName: "P2", actorId: actor2 });
+    const welcome1 = await reader1.next();
+    const welcome2 = await reader2.next();
+    expect(welcome1.type).toBe("welcome");
+    expect(welcome2.type).toBe("welcome");
+    if (welcome1.type !== "welcome" || welcome2.type !== "welcome") {
+      throw new Error("expected welcome on both participant connections");
+    }
+
+    // Owner, P1 и P2 все три подписаны на доску к этому моменту — каждый
+    // голос рассылается ОБОИМ прочим подписчикам (не только owner'у),
+    // поэтому дренируем обе оставшиеся очереди после каждого голоса.
+    const vote1 = vote(empty(), newClock(actor1), stickerA, welcome1.voterToken);
+    ws1.send(JSON.stringify({ type: "op", delta: toWire(vote1.delta) }));
+    expect((await reader1.next()).type).toBe("ack");
+    expect((await readerOwner.next()).type).toBe("op");
+    expect((await reader2.next()).type).toBe("op");
+
+    const vote2 = vote(empty(), newClock(actor2), stickerB, welcome2.voterToken);
+    ws2.send(JSON.stringify({ type: "op", delta: toWire(vote2.delta) }));
+    expect((await reader2.next()).type).toBe("ack");
+    expect((await readerOwner.next()).type).toBe("op");
+    expect((await reader1.next()).type).toBe("op");
+
+    // Временный триггер: любая вставка в ops с unvotes[0].target = stickerB
+    // проваливается — имитирует сбой БД/сети посередине массового отзыва.
+    await pool.query(`
+      CREATE OR REPLACE FUNCTION test_poison_unvote() RETURNS TRIGGER AS $$
+      BEGIN
+        IF NEW.delta -> 'unvotes' -> 0 ->> 'target' = '${stickerB}' THEN
+          RAISE EXCEPTION 'injected test failure for resetVotes atomicity test';
+        END IF;
+        RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql;
+    `);
+    await pool.query(`
+      CREATE TRIGGER test_poison_unvote_trigger
+      BEFORE INSERT ON ops
+      FOR EACH ROW EXECUTE FUNCTION test_poison_unvote();
+    `);
+
+    try {
+      wsOwner.send(
+        JSON.stringify({
+          type: "command",
+          id: "cmd-reset-atomic",
+          command: { type: "resetVotes" },
+        }),
+      );
+
+      // Транзакция падает внутри обработчика — это необработанное исключение
+      // (как "board unexpectedly not found" в других местах этого файла),
+      // owner получает error и соединение закрывается.
+      const ownerResult = await readerOwner.next();
+      expect(ownerResult.type).toBe("error");
+
+      // Ни один из двух участников не должен был получить op-рассылку —
+      // транзакция целиком откатилась ДО первого broadcast (рассылка в коде
+      // происходит только после успешного commit). Контрольная операция от
+      // owner'а (через новое соединение — старое закрыто сервером после
+      // error) должна быть ПЕРВЫМ, что видят оба участника дальше.
+      const wsOwner2 = await connect(boardId);
+      const readerOwner2 = messageReader(wsOwner2);
+      const ownerActorId2 = newActorId();
+      sendHello(wsOwner2, { guestId: ownerId, displayName: "Owner", actorId: ownerActorId2 });
+      expect((await readerOwner2.next()).type).toBe("welcome");
+
+      const canary = createSticker(empty(), newClock(ownerActorId2), {
+        column: "stop",
+        frac: "1",
+        text: "canary after failed resetVotes",
+        color: "green",
+      });
+      wsOwner2.send(JSON.stringify({ type: "op", delta: toWire(canary.delta) }));
+      expect((await readerOwner2.next()).type).toBe("ack");
+
+      const canaryId = dotKey(canary.dot);
+      const nextForP1 = await reader1.next();
+      expect(nextForP1.type).toBe("op");
+      if (nextForP1.type !== "op") throw new Error("expected op broadcast for P1");
+      expect(nextForP1.delta.created[0]?.id).toBe(canaryId);
+
+      const nextForP2 = await reader2.next();
+      expect(nextForP2.type).toBe("op");
+      if (nextForP2.type !== "op") throw new Error("expected op broadcast for P2");
+      expect(nextForP2.delta.created[0]?.id).toBe(canaryId);
+
+      // Прямая проверка журнала: ноль строк с unvotes для этой доски —
+      // транзакция откатилась целиком, а не вставила первую и упала на второй.
+      const rows = await db
+        .select({ delta: schema.ops.delta })
+        .from(schema.ops)
+        .where(eq(schema.ops.boardId, boardId));
+      const unvoteRows = rows.filter((r) => r.delta.unvotes.length > 0);
+      expect(unvoteRows).toHaveLength(0);
+
+      wsOwner2.close();
+    } finally {
+      await pool.query("DROP TRIGGER IF EXISTS test_poison_unvote_trigger ON ops;");
+      await pool.query("DROP FUNCTION IF EXISTS test_poison_unvote();");
+    }
+
+    ws1.close();
+    ws2.close();
   });
 });

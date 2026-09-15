@@ -7,6 +7,7 @@
 //
 // Остальные команды (grantFacilitator/timer) — по-прежнему не здесь.
 
+import type { WireDelta } from "@retro/crdt";
 import { activeVotes, toWire, unvote } from "@retro/crdt";
 import {
   type BoardMeta,
@@ -368,15 +369,25 @@ export function registerBoardWebSocket(app: FastifyInstance, deps: WsGatewayDeps
               // подписчикам как обычный `op` (никто из них этот отзыв ещё не
               // применял локально — в отличие от обычного op, здесь нет
               // клиента-автора, которому уже не нужно повторно слать своё же).
+              // Все вставки — в одной транзакции: частичный сбой посередине
+              // не должен оставить доску с половиной отозванных голосов
+              // (найдено code-review этого PR). Рассылка — уже ПОСЛЕ коммита:
+              // если сама транзакция не удалась, никто не узнает о попытке.
               const { state } = await replayFromSnapshot(deps.db, boardId);
-              for (const v of activeVotes(state)) {
-                const delta = toWire(unvote(state, v.dot, v.target));
-                const { seq } = await appendOp(deps.db, {
-                  boardId,
-                  dot: null,
-                  lamport: null,
-                  delta,
-                });
+              const toBroadcast: { seq: number; delta: WireDelta }[] = [];
+              await deps.db.transaction(async (tx) => {
+                for (const v of activeVotes(state)) {
+                  const delta = toWire(unvote(state, v.dot, v.target));
+                  const { seq } = await appendOp(tx, {
+                    boardId,
+                    dot: null,
+                    lamport: null,
+                    delta,
+                  });
+                  toBroadcast.push({ seq, delta });
+                }
+              });
+              for (const { seq, delta } of toBroadcast) {
                 deps.hub.broadcast(boardId, { type: "op", seq, delta });
               }
 
