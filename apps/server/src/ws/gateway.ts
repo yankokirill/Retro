@@ -170,75 +170,101 @@ export function registerBoardWebSocket(app: FastifyInstance, deps: WsGatewayDeps
             socket.close();
             return;
           }
-          const guest = await boardsService.getBoardForGuest(deps.db, {
-            boardId,
-            guestId: message.guestId,
-          });
-          if (!guest) {
-            sendError(socket, "forbidden", "not a board member — join via invite link first");
-            socket.close();
-            return;
-          }
-
-          subscriber = {
-            socket,
-            actorId: message.actorId,
-            guestId: message.guestId,
-            role: guest.role,
-          };
-          deps.hub.subscribe(boardId, subscriber);
-
-          const welcome = await welcomeData(deps.db, boardId, message.lastSeq);
-          // proj_u (T-013, REQ-006): пока доска в collect, welcome — тоже
-          // проекция получателя (protocol.md § 5 `welcome`: «всё — уже в
-          // проекции proj_u»), не только живые op/broadcast.
-          const authorsMap = guest.revealed ? null : await authorsForBoard(deps.db, boardId);
-          const project = (delta: WireDelta) =>
-            authorsMap ? projectVisible(delta, (id) => authorsMap.get(id), message.guestId) : delta;
-
-          // T-026 (H1, ВС-2(б) docs/spec/simulator.md § 13): хвост welcome
-          // (выше) несёт только seq > lastSeq — если гость был отключён на
-          // момент reveal, строки, скрытые от него во время collect с
-          // seq <= его собственного lastSeq, туда не попадают и без этой
-          // досылки не попали бы никогда (sendRevealCatchup их тоже не
-          // застал — гостя не было среди подписчиков). Диапазоны не
-          // пересекаются: upper = min(lastSeq, revealSeq) <= lastSeq, а хвост
-          // либо начинается с lastSeq+1 (upper < тот случай), либо со
-          // снапшота с upToSeq > lastSeq >= upper (снапшот-случай) —
-          // подробный разбор обоих случаев в docs/adr (при необходимости).
-          let catchupOps: { readonly seq: number; readonly delta: WireDelta }[] = [];
-          if (guest.revealed && message.lastSeq !== null && guest.revealSeq !== null) {
-            const upper = Math.min(message.lastSeq, guest.revealSeq);
-            if (upper > 0) {
-              const catchupAuthorsMap = await authorsForBoard(deps.db, boardId);
-              const rows = await opsUpTo(deps.db, boardId, upper);
-              catchupOps = rows
-                .map((row) => ({
-                  seq: row.seq,
-                  delta: projectHidden(
-                    row.delta,
-                    (id) => catchupAuthorsMap.get(id),
-                    message.guestId,
-                  ),
-                }))
-                .filter((row) => !isEmptyDelta(row.delta));
+          // T-026 (code-review находка 1): весь hello — внутри очереди этой
+          // доски, той же, что сериализует op/command. Без этого между
+          // чтением фазы ниже и подпиской на рассылку мог успеть пройти
+          // setPhase (reveal) другого соединения — тогда этот гость не
+          // застал бы ни живую досылку sendRevealCatchup (ещё не подписан),
+          // ни досылку по revealSeq ниже (guest.revealed прочитан ДО reveal).
+          // Сериализация делает эти два события строго одним из двух
+          // порядков: либо hello целиком раньше reveal (тогда обычная
+          // подписка застанет живую досылку сама), либо reveal целиком
+          // раньше hello (тогда getBoardForGuest уже видит revealed=true и
+          // актуальный revealSeq, и досылка ниже сама всё покроет). Узкого
+          // промежуточного окна, которое давало исходную гонку, больше не
+          // существует ни при каком возможном порядке прихода сообщений.
+          //
+          // Red-теста на саму гонку нет (решение пользователя, docs/tasks.md
+          // T-026): она требует переплетения двух настоящих SQL round-trip в
+          // разных соединениях, и её окно слишком узкое для надёжного
+          // воспроизведения через реальный Postgres/сокеты (test-author:
+          // 60 попыток — редко, 250 — сервер перегружается по не относящейся
+          // к делу причине). Такое свойство порядка эффектов надёжно
+          // проверяется только детерминированной моделью без настоящего
+          // I/O — это предмет симулятора (T-005), не интеграционного теста.
+          await queue.run(boardId, async () => {
+            const guest = await boardsService.getBoardForGuest(deps.db, {
+              boardId,
+              guestId: message.guestId,
+            });
+            if (!guest) {
+              sendError(socket, "forbidden", "not a board member — join via invite link first");
+              socket.close();
+              return;
             }
-          }
 
-          send(socket, {
-            type: "welcome",
-            role: guest.role,
-            voterToken: computeVoterToken(deps.voterTokenSecret, boardId, message.guestId),
-            meta: buildMeta(guest),
-            snapshot: welcome.snapshot
-              ? { upToSeq: welcome.snapshot.upToSeq, state: project(welcome.snapshot.state) }
-              : null,
-            ops: [
-              ...catchupOps,
-              ...welcome.ops
-                .map((row) => ({ seq: row.seq, delta: project(row.delta) }))
-                .filter((row) => !isEmptyDelta(row.delta)),
-            ],
+            subscriber = {
+              socket,
+              actorId: message.actorId,
+              guestId: message.guestId,
+              role: guest.role,
+            };
+            deps.hub.subscribe(boardId, subscriber);
+
+            const welcome = await welcomeData(deps.db, boardId, message.lastSeq);
+            // proj_u (T-013, REQ-006): пока доска в collect, welcome — тоже
+            // проекция получателя (protocol.md § 5 `welcome`: «всё — уже в
+            // проекции proj_u»), не только живые op/broadcast.
+            const authorsMap = guest.revealed ? null : await authorsForBoard(deps.db, boardId);
+            const project = (delta: WireDelta) =>
+              authorsMap
+                ? projectVisible(delta, (id) => authorsMap.get(id), message.guestId)
+                : delta;
+
+            // T-026 (H1, ВС-2(б) docs/spec/simulator.md § 13): хвост welcome
+            // (выше) несёт только seq > lastSeq — если гость был отключён на
+            // момент reveal, строки, скрытые от него во время collect с
+            // seq <= его собственного lastSeq, туда не попадают и без этой
+            // досылки не попали бы никогда (sendRevealCatchup их тоже не
+            // застал — гостя не было среди подписчиков). Диапазоны не
+            // пересекаются: upper = min(lastSeq, revealSeq) <= lastSeq, а хвост
+            // либо начинается с lastSeq+1 (upper < тот случай), либо со
+            // снапшота с upToSeq > lastSeq >= upper (снапшот-случай) —
+            // подробный разбор обоих случаев в docs/adr (при необходимости).
+            let catchupOps: { readonly seq: number; readonly delta: WireDelta }[] = [];
+            if (guest.revealed && message.lastSeq !== null && guest.revealSeq !== null) {
+              const upper = Math.min(message.lastSeq, guest.revealSeq);
+              if (upper > 0) {
+                const catchupAuthorsMap = await authorsForBoard(deps.db, boardId);
+                const rows = await opsUpTo(deps.db, boardId, upper);
+                catchupOps = rows
+                  .map((row) => ({
+                    seq: row.seq,
+                    delta: projectHidden(
+                      row.delta,
+                      (id) => catchupAuthorsMap.get(id),
+                      message.guestId,
+                    ),
+                  }))
+                  .filter((row) => !isEmptyDelta(row.delta));
+              }
+            }
+
+            send(socket, {
+              type: "welcome",
+              role: guest.role,
+              voterToken: computeVoterToken(deps.voterTokenSecret, boardId, message.guestId),
+              meta: buildMeta(guest),
+              snapshot: welcome.snapshot
+                ? { upToSeq: welcome.snapshot.upToSeq, state: project(welcome.snapshot.state) }
+                : null,
+              ops: [
+                ...catchupOps,
+                ...welcome.ops
+                  .map((row) => ({ seq: row.seq, delta: project(row.delta) }))
+                  .filter((row) => !isEmptyDelta(row.delta)),
+              ],
+            });
           });
           return;
         }
