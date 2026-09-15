@@ -14,9 +14,10 @@
 // (кроме `app.ts`/`boards/service.ts`, чей контракт дан в задаче verbatim) и
 // `packages/crdt/src/ops/**` не читались.
 
-import type { EntityId } from "@retro/crdt";
+import type { EntityId, WireDelta } from "@retro/crdt";
 import {
   createSticker,
+  deleteEntity,
   dotKey,
   empty,
   newClock,
@@ -1438,5 +1439,162 @@ describe("REQ-016: массовый отзыв голосов атомарен �
 
     ws1.close();
     ws2.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// fix/T-011-op-single-entity — находка независимого /code-review (high):
+// `apps/server/src/ops/permissions.ts` (`classifyAction`) и
+// `apps/server/src/ws/gateway.ts` (`isOwn`) смотрят только на ПЕРВУЮ запись
+// дельты, чтобы классифицировать действие и проверить владение; сама схема
+// `clientDeltaSchema` (`packages/protocol/src/wire.ts`) сейчас гарантирует
+// только «один dot», а не «одна сущность» (docs/spec/consistency-model.md
+// § 7 V2, уточнено: «все записи и, если есть, создание — одной и той же
+// сущности»; docs/spec/protocol.md § 5 invalid_shape). Клиент может
+// склеить в одну дельту записи ДВУХ сущностей под одним (поддельным) dot —
+// сервер провалидирует форму, классифицирует действие по первой записи и
+// пропустит вторую (чужую) запись без проверки прав.
+//
+// Тест ниже воспроизводит сценарий 2 из отчёта code-review целиком через
+// реальный WS + Postgres: participant прячет `deleted: true` на чужом
+// стикере Y внутри своей же честной `createSticker`-дельты, подделывая у
+// скрытой записи только dot/stamp (та же минимальная техника подделки
+// одного поля на массиве записей, что и в блоке ADR-0008 выше в этом
+// файле). Написан ДО исправления — обе проверки ниже (тип ответа и то, что
+// Y реально не удалён в журнале) были КРАСНЫМИ до фикса: сервер отвечал
+// `ack`, а Y оказывался по-настоящему помечен `deleted` в БД — дыра не
+// гипотетическая, а реально работала целиком через протокол.
+//
+// Уточнение при реализации фикса (моё, не test-author): нарушение V2
+// проверяется в `clientDeltaSchema` — части `clientMessageSchema`
+// (`packages/protocol/src/messages.ts`), которую `gateway.ts` разбирает
+// ДО того, как вообще узнаёт dot операции. Как и три уже существующих
+// `.refine` той же схемы («один dot», «unvote не смешан», «supersede — из
+// этой дельты»), нарушение формы — это `error` (сообщение целиком отвергнуто,
+// соединение закрывается), а не `reject` (отказ конкретной, но по форме
+// валидной операции, соединение остаётся) — так это уже работает для любого
+// другого нарушения V2 в этом протоколе, не новое поведение.
+//
+// `apps/server/src/ops/permissions.ts`, `apps/server/src/ws/gateway.ts`,
+// `apps/server/src/ops/validate.ts` не читались test-author'ом при написании
+// теста — поведение было описано заказчиком теста достаточно точно; тип
+// ответа (`error`, не `reject`) уточнён мной по факту прогона после фикса.
+// ---------------------------------------------------------------------------
+
+describe("V2 (форма), находка code-review (high): createSticker + скрытое deleted=true на чужой сущности под тем же dot", () => {
+  it("REQ-007/REQ-009/REQ-011, V2: participant прячет удаление чужого стикера Y внутри своей createSticker-дельты — сервер отвергает всё сообщение (error invalid_shape) и Y НЕ удаляется", async () => {
+    const ownerId = newGuestId();
+    const { boardId, participantLink } = await createBoard(db, {
+      title: "V2 hole — hidden delete of another entity",
+      displayName: "Owner",
+      voteLimit: 3,
+      ownerId,
+    });
+
+    // Owner создаёт стикер Y обычным путём, в фазе collect (доска только что создана).
+    const wsOwner = await connect(boardId);
+    const readerOwner = messageReader(wsOwner);
+    const ownerActorId = newActorId();
+    sendHello(wsOwner, { guestId: ownerId, displayName: "Owner", actorId: ownerActorId });
+    expect((await readerOwner.next()).type).toBe("welcome");
+
+    const createdY = createSticker(empty(), newClock(ownerActorId), {
+      column: "start",
+      frac: "y",
+      text: "victim sticker Y",
+      color: "yellow",
+    });
+    wsOwner.send(JSON.stringify({ type: "op", delta: toWire(createdY.delta) }));
+    const ackY = await readerOwner.next();
+    expect(ackY.type).toBe("ack");
+    const stickerY = dotKey(createdY.dot) as EntityId;
+
+    // Участник присоединяется по ссылке — обычная роль participant.
+    const attackerId = newGuestId();
+    const joined = await joinByLink(db, {
+      linkToken: participantLink,
+      guestId: attackerId,
+      displayName: "Attacker",
+    });
+    expect(joined?.role).toBe("participant");
+
+    const wsAttacker = await connect(boardId);
+    const readerAttacker = messageReader(wsAttacker);
+    const attackerActorId = newActorId();
+    sendHello(wsAttacker, {
+      guestId: attackerId,
+      displayName: "Attacker",
+      actorId: attackerActorId,
+    });
+    const welcomeAttacker = await readerAttacker.next();
+    expect(welcomeAttacker.type).toBe("welcome");
+
+    // Честная часть дельты: participant создаёт СВОЙ новый стикер — один
+    // dot, created + 5 entries, всё про эту новую сущность.
+    // `createdY.delta` передаём как локальное "state" только чтобы честно
+    // посчитать lamport выше максимума, который уже видел Y (нужно для
+    // V4 у скрытой записи ниже) — на форму дельты это не влияет.
+    const own = createSticker(createdY.delta, newClock(attackerActorId), {
+      column: "stop",
+      frac: "a",
+      text: "attacker's own sticker",
+      color: "pink",
+    });
+
+    // Нечестная часть: "как будто" честная deleteEntity(Y) — берём её
+    // supersedes (реальный dot создания Y), но dot/stamp записи подменяем
+    // на dot/stamp ЧЕСТНОЙ части (own), чтобы вся дельта несла один dot —
+    // единственное, что сейчас проверяет clientDeltaSchema (operationDots).
+    const del = deleteEntity(createdY.delta, own.clock, stickerY);
+
+    const ownWire = toWire(own.delta);
+    const delWire = toWire(del.delta);
+    const [victimEntry] = delWire.entries;
+    if (!victimEntry) throw new Error("expected deleteEntity to produce exactly one entry");
+    const [ownStampSource] = ownWire.entries;
+    if (!ownStampSource) throw new Error("expected createSticker to produce entries");
+
+    const forgedDelta: WireDelta = {
+      created: ownWire.created,
+      entries: [...ownWire.entries, { ...victimEntry, dot: own.dot, stamp: ownStampSource.stamp }],
+      supersedes: [...ownWire.supersedes, ...delWire.supersedes],
+      votes: [],
+      unvotes: [],
+    };
+
+    wsAttacker.send(JSON.stringify({ type: "op", delta: forgedDelta }));
+    const result = await readerAttacker.next();
+
+    // V2 — форма всего сообщения (clientMessageSchema, packages/protocol),
+    // проверяется ДО того, как сервер вообще разбирает dot операции — как и
+    // три уже существующих `.refine` той же схемы (один dot, unvote не
+    // смешан с другим, supersede — из этой же дельты). Нарушение формы
+    // здесь — фатальная ошибка сообщения (`error`, соединение закрывается),
+    // а не отказ конкретной операции (`reject`, соединение остаётся) — это
+    // ack/reject предполагают уже провалидированный по форме `dot` для
+    // корреляции с очередью клиента, здесь его в принципе нет надёжно (dot
+    // подделан). До добавления недостающего `.refine` этот expect был
+    // красным — сервер отвечал `ack`, дыра пропускала атаку насквозь.
+    expect(result.type).toBe("error");
+    if (result.type !== "error") throw new Error("V2 hole: server accepted instead of error");
+    expect(result.reason).toBe("invalid_shape");
+
+    // Прямое подтверждение через журнал в Postgres, что дыра не
+    // гипотетическая: если сервер принял дельту, в `ops` реально лежит
+    // строка, отмечающая Y как deleted=true — чужой стикер удалён по-настоящему.
+    const rows = await db
+      .select({ delta: schema.ops.delta })
+      .from(schema.ops)
+      .where(eq(schema.ops.boardId, boardId));
+    const yWasDeletedByAttacker = rows.some((row) =>
+      row.delta.entries.some(
+        (entry) =>
+          entry.key.entity === stickerY && entry.key.field === "deleted" && entry.value === true,
+      ),
+    );
+    expect(yWasDeletedByAttacker).toBe(false);
+
+    wsOwner.close();
+    wsAttacker.close();
   });
 });
