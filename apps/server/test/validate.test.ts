@@ -143,19 +143,20 @@ describe("REQ-024: V1 — свежий dot", () => {
     expectRejected(result, "stale_dot");
   });
 
-  it("REQ-024: V1 — owner(a) ≠ u применяется и к unvote (dot отзываемого голоса не принадлежит соединению)", () => {
+  it("REQ-015 (кр. 4), ADR-0008: V1 НЕ применяется к unvote — dot отзываемого голоса не обязан принадлежать этому соединению", () => {
     const { clockA, stickerId, state } = stickerFixture();
     const voted = vote(state, clockA, stickerId, "voter-token-a");
     const stateWithVote = merge(state, voted.delta);
-    const impostor = newActor();
+    const impostor = newActor(); // другая вкладка / соединение после перезагрузки того же участника —
+    // `voted.dot` это dot операции vote чужого (более раннего) соединения, не dot самой unvote (§ 3.1)
 
     const result = validateOp({
       state: stateWithVote,
-      connectionActorId: impostor, // не actorA — владелец отзываемого голоса
+      connectionActorId: impostor, // не actorA — но это НЕ владелец отзываемого голоса по V1, а другой actorId того же voterToken
       delta: toWire(unvote(stateWithVote, voted.dot, stickerId)),
       actorClock: null,
     });
-    expectRejected(result, "stale_dot");
+    expect(result.ok).toBe(true);
   });
 
   it("REQ-024: V1 — unvote с actorClock=null НЕ отклоняется по свежести счётчика (own vote)", () => {

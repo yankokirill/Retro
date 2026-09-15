@@ -15,7 +15,16 @@
 // `packages/crdt/src/ops/**` не читались.
 
 import type { EntityId } from "@retro/crdt";
-import { createSticker, dotKey, empty, newClock, setColor, toWire, vote } from "@retro/crdt";
+import {
+  createSticker,
+  dotKey,
+  empty,
+  newClock,
+  setColor,
+  toWire,
+  unvote,
+  vote,
+} from "@retro/crdt";
 import type { ServerMessage } from "@retro/protocol";
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from "@testcontainers/postgresql";
 import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
@@ -943,5 +952,303 @@ describe("REQ-022: op-рассылка чужой операции доходи�
 
     wsTab1.close();
     wsTab2.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ADR-0008 — `unvote.dot` в проводном формате это dot ОТЗЫВАЕМОГО голоса
+// (`vd`, чужая более ранняя операция `vote`), а не собственный dot операции
+// отзыва (docs/spec/consistency-model.md § 3.1, § 7 V1/V7). Два связанных
+// бага, найденные code-review T-012 (docs/adr/0008-…md), ещё не исправлены:
+//
+// 1. V1 ошибочно требует `vd.actor = connectionActorId` — отзыв голоса из
+//    другой вкладки того же участника (другой actorId, тот же guestId) или
+//    после перезагрузки страницы (тоже новый actorId) отклоняется как
+//    `stale_dot`, хотя принадлежность голоса должна проверяться по
+//    `voterToken` (V7 `checkVoteOwnership`, T-012), а не по actorId
+//    соединения (REQ-015 кр. 4, REQ-002 кр. 2).
+// 2. Повторная отправка уже применённого `unvote` (тот же `(vd, target)`,
+//    независимо от того, кто его инициировал — тот же клиент повторно или
+//    сервер через `resetVotes`) должна быть идемпотентным `ack` с `seq`
+//    уже существующей записи журнала (REQ-023 кр. 3), а не `reject
+//    not_own_vote`.
+//
+// Тесты ниже написаны ДО исправления реализации — они должны падать именно
+// из-за этих багов, не из-за самого теста. `apps/server/src/ws/gateway.ts`,
+// `apps/server/src/ops/validate.ts`, `apps/server/src/ops/votes.ts`,
+// `apps/server/src/ops/log.ts` не читались — контракт целиком из
+// `docs/adr/0008-…md`, `docs/spec/consistency-model.md` § 7,
+// `docs/spec/protocol.md` § 5–6.
+// ---------------------------------------------------------------------------
+
+describe("ADR-0008: unvote не привязан к actorId соединения — принадлежность по voterToken (V7), не по dot.actor (V1)", () => {
+  it("REQ-015 (кр. 4), ADR-0008: голос, отданный в одной вкладке, можно отозвать из другой вкладки того же участника — ack, не reject stale_dot", async () => {
+    const { boardId, ownerId, participantLink } = await newBoardWithLinks(3);
+    const stickerId = await ownerCreatesStickerAndEntersVotePhase(boardId, ownerId);
+
+    const participantId = newGuestId();
+    const joined = await joinByLink(db, {
+      linkToken: participantLink,
+      guestId: participantId,
+      displayName: "TwoTabs",
+    });
+    expect(joined?.role).toBe("participant");
+
+    const wsTab1 = await connect(boardId);
+    const readerTab1 = messageReader(wsTab1);
+    const actorTab1 = newActorId();
+    sendHello(wsTab1, { guestId: participantId, displayName: "TwoTabs", actorId: actorTab1 });
+    const welcomeTab1 = await readerTab1.next();
+    expect(welcomeTab1.type).toBe("welcome");
+    if (welcomeTab1.type !== "welcome") throw new Error("expected welcome on tab 1");
+    const voterToken = welcomeTab1.voterToken;
+
+    const votedTab1 = vote(empty(), newClock(actorTab1), stickerId, voterToken);
+    wsTab1.send(JSON.stringify({ type: "op", delta: toWire(votedTab1.delta) }));
+    const ackVote = await readerTab1.next();
+    expect(ackVote.type).toBe("ack");
+
+    // Вторая вкладка того же участника — другой actorId, тот же guestId и,
+    // значит, тот же voterToken (протокол.md § 2: voterToken = HMAC(secret,
+    // boardId + guestId)).
+    const wsTab2 = await connect(boardId);
+    const readerTab2 = messageReader(wsTab2);
+    const actorTab2 = newActorId();
+    sendHello(wsTab2, { guestId: participantId, displayName: "TwoTabs", actorId: actorTab2 });
+    const welcomeTab2 = await readerTab2.next();
+    expect(welcomeTab2.type).toBe("welcome");
+    if (welcomeTab2.type !== "welcome") throw new Error("expected welcome on tab 2");
+    expect(welcomeTab2.voterToken).toBe(voterToken);
+
+    const unvoteDelta = unvote(empty(), votedTab1.dot, stickerId);
+    wsTab2.send(JSON.stringify({ type: "op", delta: toWire(unvoteDelta) }));
+    const result = await nextOfType(readerTab2, ["ack", "reject"] as const);
+    expect(result.type).toBe("ack");
+
+    wsTab1.close();
+    wsTab2.close();
+  });
+
+  it("REQ-002 (кр. 2), ADR-0008: голос, отданный до перезагрузки страницы, можно отозвать новым соединением того же guestId — ack, не reject stale_dot", async () => {
+    const { boardId, ownerId, participantLink } = await newBoardWithLinks(3);
+    const stickerId = await ownerCreatesStickerAndEntersVotePhase(boardId, ownerId);
+
+    const participantId = newGuestId();
+    const joined = await joinByLink(db, {
+      linkToken: participantLink,
+      guestId: participantId,
+      displayName: "Reload",
+    });
+    expect(joined?.role).toBe("participant");
+
+    const ws1 = await connect(boardId);
+    const reader1 = messageReader(ws1);
+    const actor1 = newActorId();
+    sendHello(ws1, { guestId: participantId, displayName: "Reload", actorId: actor1 });
+    const welcome1 = await reader1.next();
+    expect(welcome1.type).toBe("welcome");
+    if (welcome1.type !== "welcome") throw new Error("expected welcome");
+    const voterToken = welcome1.voterToken;
+
+    const voted = vote(empty(), newClock(actor1), stickerId, voterToken);
+    ws1.send(JSON.stringify({ type: "op", delta: toWire(voted.delta) }));
+    const ackVote = await reader1.next();
+    expect(ackVote.type).toBe("ack");
+
+    // Эмулируем перезагрузку страницы: первое соединение закрывается
+    // ПОСЛЕДОВАТЕЛЬНО (не параллельно), новое открывается уже после этого,
+    // с новым actorId, но тем же guestId.
+    await new Promise<void>((resolve) => {
+      ws1.on("close", () => resolve());
+      ws1.close();
+    });
+
+    const ws2 = await connect(boardId);
+    const reader2 = messageReader(ws2);
+    const actor2 = newActorId();
+    sendHello(ws2, { guestId: participantId, displayName: "Reload", actorId: actor2 });
+    const welcome2 = await reader2.next();
+    expect(welcome2.type).toBe("welcome");
+    if (welcome2.type !== "welcome") throw new Error("expected welcome after reconnect");
+    expect(welcome2.voterToken).toBe(voterToken);
+
+    const unvoteDelta = unvote(empty(), voted.dot, stickerId);
+    ws2.send(JSON.stringify({ type: "op", delta: toWire(unvoteDelta) }));
+    const result = await nextOfType(reader2, ["ack", "reject"] as const);
+    expect(result.type).toBe("ack");
+
+    ws2.close();
+  });
+
+  it("REQ-015 (кр. 4): попытка отозвать чужой голос (другой guestId/voterToken) отклоняется как not_own_vote — checkVoteOwnership (V7, T-012) не должна пострадать от снятия V1 (ADR-0008)", async () => {
+    const { boardId, ownerId, participantLink } = await newBoardWithLinks(3);
+    const stickerId = await ownerCreatesStickerAndEntersVotePhase(boardId, ownerId);
+
+    const guestA = newGuestId();
+    const guestB = newGuestId();
+    await joinByLink(db, { linkToken: participantLink, guestId: guestA, displayName: "A" });
+    await joinByLink(db, { linkToken: participantLink, guestId: guestB, displayName: "B" });
+
+    const wsA = await connect(boardId);
+    const wsB = await connect(boardId);
+    const readerA = messageReader(wsA);
+    const readerB = messageReader(wsB);
+
+    const actorA = newActorId();
+    const actorB = newActorId();
+    sendHello(wsA, { guestId: guestA, displayName: "A", actorId: actorA });
+    sendHello(wsB, { guestId: guestB, displayName: "B", actorId: actorB });
+    const welcomeA = await readerA.next();
+    const welcomeB = await readerB.next();
+    expect(welcomeA.type).toBe("welcome");
+    expect(welcomeB.type).toBe("welcome");
+    if (welcomeA.type !== "welcome" || welcomeB.type !== "welcome") {
+      throw new Error("expected welcome on both connections");
+    }
+    expect(welcomeA.voterToken).not.toBe(welcomeB.voterToken);
+
+    const voteA = vote(empty(), newClock(actorA), stickerId, welcomeA.voterToken);
+    wsA.send(JSON.stringify({ type: "op", delta: toWire(voteA.delta) }));
+    const ackA = await readerA.next();
+    expect(ackA.type).toBe("ack");
+
+    // B заявляет dot чужого (A) голоса — минимальная, но реалистичная
+    // подделка одного поля (как уже делает validate.test.ts): в реальности
+    // B не мог бы узнать чужой dot, здесь это проверка, что сервер не
+    // доверяет заявленному dot без проверки владения по voterToken.
+    const forgedUnvote = unvote(empty(), voteA.dot, stickerId);
+    wsB.send(JSON.stringify({ type: "op", delta: toWire(forgedUnvote) }));
+    const resultB = await nextOfType(readerB, ["ack", "reject"] as const);
+
+    expect(resultB.type).toBe("reject");
+    if (resultB.type !== "reject") {
+      throw new Error("expected reject for unvote of someone else's vote");
+    }
+    expect(resultB.reason).toBe("not_own_vote");
+
+    wsA.close();
+    wsB.close();
+  });
+});
+
+describe("REQ-023 (кр. 3), ADR-0008: идемпотентность unvote — по паре (dot отзываемого голоса, target) в журнале, не отказ not_own_vote", () => {
+  it("REQ-023 (кр. 3), ADR-0008: повторная отправка уже применённого unvote получает ack с тем же seq, не reject not_own_vote", async () => {
+    const { boardId, ownerId } = await newBoardWithLinks(3);
+    const stickerId = await ownerCreatesStickerAndEntersVotePhase(boardId, ownerId);
+
+    const ws = await connect(boardId);
+    const reader = messageReader(ws);
+    const actorId = newActorId();
+    sendHello(ws, { guestId: ownerId, displayName: "Owner", actorId });
+    const welcome = await reader.next();
+    expect(welcome.type).toBe("welcome");
+    if (welcome.type !== "welcome") throw new Error("expected welcome");
+
+    const voted = vote(empty(), newClock(actorId), stickerId, welcome.voterToken);
+    ws.send(JSON.stringify({ type: "op", delta: toWire(voted.delta) }));
+    const ackVote = await reader.next();
+    expect(ackVote.type).toBe("ack");
+
+    const unvoteDelta = unvote(empty(), voted.dot, stickerId);
+    const unvoteMessage = JSON.stringify({ type: "op", delta: toWire(unvoteDelta) });
+
+    ws.send(unvoteMessage);
+    const firstUnvoteResult = await reader.next();
+    expect(firstUnvoteResult.type).toBe("ack");
+    if (firstUnvoteResult.type !== "ack") throw new Error("expected ack for first unvote");
+
+    // Точно то же сообщение (тот же dot отзываемого голоса, та же target) —
+    // как после разрыва соединения и повторной отправки очереди (REQ-023 кр. 3).
+    ws.send(unvoteMessage);
+    const secondUnvoteResult = await reader.next();
+    expect(secondUnvoteResult.type).toBe("ack");
+    if (secondUnvoteResult.type !== "ack") {
+      throw new Error("expected ack for repeated unvote, not a reject");
+    }
+    expect(secondUnvoteResult.seq).toBe(firstUnvoteResult.seq);
+
+    ws.close();
+  });
+
+  it("REQ-016 + ADR-0008: собственный unvote на голос, уже отозванный resetVotes, получает ack с тем же seq, что и unvote-запись resetVotes", async () => {
+    const { boardId, ownerId, participantLink } = await newBoardWithLinks(1);
+    const stickerId = await ownerCreatesStickerAndEntersVotePhase(boardId, ownerId);
+
+    const participantId = newGuestId();
+    const joined = await joinByLink(db, {
+      linkToken: participantLink,
+      guestId: participantId,
+      displayName: "Exhausted",
+    });
+    expect(joined?.role).toBe("participant");
+
+    const wsOwner = await connect(boardId);
+    const wsParticipant = await connect(boardId);
+    const readerOwner = messageReader(wsOwner);
+    const readerParticipant = messageReader(wsParticipant);
+
+    const ownerActorId = newActorId();
+    const participantActorId = newActorId();
+    sendHello(wsOwner, { guestId: ownerId, displayName: "Owner", actorId: ownerActorId });
+    sendHello(wsParticipant, {
+      guestId: participantId,
+      displayName: "Exhausted",
+      actorId: participantActorId,
+    });
+    const welcomeOwner = await readerOwner.next();
+    const welcomeParticipant = await readerParticipant.next();
+    expect(welcomeOwner.type).toBe("welcome");
+    expect(welcomeParticipant.type).toBe("welcome");
+    if (welcomeParticipant.type !== "welcome") throw new Error("expected welcome");
+    const voterToken = welcomeParticipant.voterToken;
+
+    const voted = vote(empty(), newClock(participantActorId), stickerId, voterToken);
+    wsParticipant.send(JSON.stringify({ type: "op", delta: toWire(voted.delta) }));
+    const ackVote = await readerParticipant.next();
+    expect(ackVote.type).toBe("ack");
+
+    // Owner подписан на доску и не автор этой операции — получает op-рассылку
+    // голоса участника раньше, чем что-либо связанное с resetVotes ниже (как
+    // в T-012 тесте "owner сбрасывает голоса" выше).
+    const ownerSeesVote = await readerOwner.next();
+    expect(ownerSeesVote.type).toBe("op");
+
+    wsOwner.send(
+      JSON.stringify({ type: "command", id: "cmd-reset-e", command: { type: "resetVotes" } }),
+    );
+
+    // Участник (не инициатор resetVotes) получает op-рассылку с unvote,
+    // сгенерированным resetVotes — нужен именно её seq, чтобы сравнить с
+    // seq собственного unvote ниже.
+    const participantOp = await nextOfType(readerParticipant, ["op"] as const);
+    expect(participantOp.delta.unvotes).toHaveLength(1);
+    expect(participantOp.delta.unvotes[0]?.dot).toEqual(voted.dot);
+    expect(participantOp.delta.unvotes[0]?.target).toBe(stickerId);
+    const resetVoteSeq = participantOp.seq;
+
+    // Дренируем ответ owner'у (commandResult + собственный op), порядок
+    // между ними не гарантирован (как в T-012 тесте выше).
+    const ownerFirst = await readerOwner.next();
+    const ownerSecond = await readerOwner.next();
+    const ownerCommandResult = [ownerFirst, ownerSecond].find((m) => m.type === "commandResult");
+    expect(ownerCommandResult?.type).toBe("commandResult");
+    if (ownerCommandResult?.type !== "commandResult") throw new Error("expected commandResult");
+    expect(ownerCommandResult.ok).toBe(true);
+
+    // Тот же участник теперь сам отзывает тот же голос, который уже отозвал
+    // resetVotes — желаемое конечное состояние уже достигнуто, это должен
+    // быть ack с seq уже существующей записи журнала, не отказ.
+    const ownUnvote = unvote(empty(), voted.dot, stickerId);
+    wsParticipant.send(JSON.stringify({ type: "op", delta: toWire(ownUnvote) }));
+    const ownUnvoteResult = await nextOfType(readerParticipant, ["ack", "reject"] as const);
+
+    expect(ownUnvoteResult.type).toBe("ack");
+    if (ownUnvoteResult.type !== "ack") {
+      throw new Error("expected ack for own unvote already applied by resetVotes");
+    }
+    expect(ownUnvoteResult.seq).toBe(resetVoteSeq);
+
+    wsOwner.close();
+    wsParticipant.close();
   });
 });
