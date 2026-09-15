@@ -26,6 +26,7 @@ import {
   appendOp,
   type Db,
   findOp,
+  findUnvoteSeq,
   replayFromSnapshot,
   welcomeData,
 } from "../ops/log.js";
@@ -173,6 +174,25 @@ export function registerBoardWebSocket(app: FastifyInstance, deps: WsGatewayDeps
               const existing = await findOp(deps.db, boardId, dot.actor, dot.counter);
               if (existing) {
                 send(socket, { type: "ack", dot, seq: existing.seq });
+                return;
+              }
+            }
+
+            // ADR-0008 (REQ-023 кр.3): для unvote идемпотентность — по
+            // (dot отзываемого голоса, target) в журнале, не по (actor,
+            // counter) — у unvote нет своей пары. Повтор (тем же клиентом
+            // заново, или уже отозвано `resetVotes`) — ack с seq уже
+            // существующей записи, без повторного применения и без V7.
+            if (isUnvote) {
+              const existingSeq = await findUnvoteSeq(
+                deps.db,
+                boardId,
+                dot,
+                // clientDeltaSchema гарантирует ровно один элемент в unvotes.
+                message.delta.unvotes[0]?.target ?? "",
+              );
+              if (existingSeq !== null) {
+                send(socket, { type: "ack", dot, seq: existingSeq });
                 return;
               }
             }
