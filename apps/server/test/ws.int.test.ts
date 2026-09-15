@@ -28,7 +28,7 @@ import {
 } from "@retro/crdt";
 import type { ServerMessage } from "@retro/protocol";
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from "@testcontainers/postgresql";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import type { FastifyInstance } from "fastify";
@@ -1596,5 +1596,111 @@ describe("V2 (форма), находка code-review (high): createSticker + с
 
     wsOwner.close();
     wsAttacker.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Находка 6 code-review (T-011+T-012, тот же класс проблемы, что и у
+// resetVotes выше): appendOp и recordAuthor писались вне транзакции — сбой
+// recordAuthor посередине оставлял операцию уже в журнале, но без автора.
+// Повторная отправка того же create находила dot по findOp (идемпотентность,
+// REQ-023 кр.3) и получала `ack`, ни разу не вызывая recordAuthor снова —
+// стикер навсегда оставался без автора, REQ-007/REQ-009 («только свой»)
+// невозможно было бы удовлетворить для этого стикера никогда.
+//
+// Исправлено (см. коммит): appendOp+recordAuthor — одна транзакция
+// db.transaction(...). Тест ниже подделывает сбой recordAuthor через
+// временный BEFORE INSERT триггер Postgres на authors (без хуков в коде
+// продукта) и проверяет: (1) вся транзакция откатилась — ни строки в ops,
+// ни строки в authors; (2) после снятия триггера точно тот же create можно
+// отправить повторно и он проходит нормально, с корректно записанным
+// автором — состояние не застревает сломанным навсегда.
+// ---------------------------------------------------------------------------
+
+describe("REQ-007/REQ-009: appendOp+recordAuthor атомарны — сбой посередине не оставляет стикер без автора", () => {
+  it("createSticker: сбой при записи автора откатывает и журнал; повтор того же create после снятия сбоя проходит нормально", async () => {
+    const ownerId = newGuestId();
+    const { boardId, participantLink } = await createBoard(db, {
+      title: "author atomicity",
+      displayName: "Owner",
+      voteLimit: 3,
+      ownerId,
+    });
+
+    const participantId = newGuestId();
+    await joinByLink(db, {
+      linkToken: participantLink,
+      guestId: participantId,
+      displayName: "Author",
+    });
+
+    const ws = await connect(boardId);
+    const reader = messageReader(ws);
+    const actorId = newActorId();
+    sendHello(ws, { guestId: participantId, displayName: "Author", actorId });
+    expect((await reader.next()).type).toBe("welcome");
+
+    const created = createSticker(empty(), newClock(actorId), {
+      column: "start",
+      frac: "1",
+      text: "orphan-prone sticker",
+      color: "yellow",
+    });
+    const stickerId = dotKey(created.dot) as EntityId;
+    const opMessage = JSON.stringify({ type: "op", delta: toWire(created.delta) });
+
+    await pool.query(`
+      CREATE OR REPLACE FUNCTION test_poison_author() RETURNS TRIGGER AS $$
+      BEGIN
+        IF NEW.entity_id = '${stickerId}' THEN
+          RAISE EXCEPTION 'injected test failure for recordAuthor atomicity test';
+        END IF;
+        RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql;
+    `);
+    await pool.query(`
+      CREATE TRIGGER test_poison_author_trigger
+      BEFORE INSERT ON authors
+      FOR EACH ROW EXECUTE FUNCTION test_poison_author();
+    `);
+
+    try {
+      ws.send(opMessage);
+      const failed = await reader.next();
+      expect(failed.type).toBe("error");
+
+      // Транзакция должна была откатиться целиком — ни строки в ops, ни в authors.
+      const opsRows = await db
+        .select({ delta: schema.ops.delta })
+        .from(schema.ops)
+        .where(eq(schema.ops.boardId, boardId));
+      const hasOrphanOp = opsRows.some((row) => row.delta.created.some((c) => c.id === stickerId));
+      expect(hasOrphanOp).toBe(false);
+    } finally {
+      await pool.query("DROP TRIGGER IF EXISTS test_poison_author_trigger ON authors;");
+      await pool.query("DROP FUNCTION IF EXISTS test_poison_author();");
+    }
+
+    // Сбой снят — тот же клиент повторно отправляет ТОЧНО ТУ ЖЕ дельту
+    // (как и должен делать outbox при повторной доставке, REQ-023 кр.3).
+    // Состояние не застряло — create проходит нормально, автор записывается.
+    const ws2 = await connect(boardId);
+    const reader2 = messageReader(ws2);
+    sendHello(ws2, { guestId: participantId, displayName: "Author", actorId });
+    expect((await reader2.next()).type).toBe("welcome");
+
+    ws2.send(opMessage);
+    const retryResult = await reader2.next();
+    expect(retryResult.type).toBe("ack");
+
+    const authorRow = await db
+      .select({ guestId: schema.authors.guestId })
+      .from(schema.authors)
+      .where(and(eq(schema.authors.boardId, boardId), eq(schema.authors.entityId, stickerId)));
+    expect(authorRow[0]?.guestId).toBe(participantId);
+
+    ws.close();
+    ws2.close();
   });
 });

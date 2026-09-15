@@ -224,7 +224,7 @@ export function registerBoardWebSocket(app: FastifyInstance, deps: WsGatewayDeps
               const phaseRaw = await boardsService.getBoardPhase(deps.db, boardId);
               const [entry] = message.delta.entries;
               const isOwn =
-                action === "editSticker" && entry
+                (action === "editSticker" || action === "moveSticker") && entry
                   ? (await authorOf(deps.db, boardId, entry.key.entity)) === sub.guestId
                   : true;
               const permission = checkPermission({
@@ -292,17 +292,28 @@ export function registerBoardWebSocket(app: FastifyInstance, deps: WsGatewayDeps
               }
             }
 
-            const { seq } = await appendOp(deps.db, {
-              boardId,
-              dot: isUnvote ? null : dot,
-              lamport,
-              delta: message.delta,
-            });
+            // Находка code-review (fix/T-011-op-single-entity): appendOp и
+            // recordAuthor — одна транзакция. Без неё сбой recordAuthor
+            // посередине оставлял операцию уже в журнале без записанного
+            // автора — повторная отправка того же create находила dot по
+            // findOp выше и получала ack, ни разу не дойдя до recordAuthor
+            // снова: стикер навсегда оставался без автора, участник не мог
+            // его редактировать/удалять как свой (REQ-007/REQ-009).
+            const seq = await deps.db.transaction(async (tx) => {
+              const { seq } = await appendOp(tx, {
+                boardId,
+                dot: isUnvote ? null : dot,
+                lamport,
+                delta: message.delta,
+              });
 
-            const [created] = message.delta.created;
-            if (created && created.kind === "sticker") {
-              await recordAuthor(deps.db, boardId, created.id, sub.guestId);
-            }
+              const [created] = message.delta.created;
+              if (created && created.kind === "sticker") {
+                await recordAuthor(tx, boardId, created.id, sub.guestId);
+              }
+
+              return seq;
+            });
 
             send(socket, { type: "ack", dot, seq });
             deps.hub.broadcast(boardId, { type: "op", seq, delta: message.delta }, sub);

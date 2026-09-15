@@ -14,7 +14,12 @@ import type { State, WireDelta } from "@retro/crdt";
 import { entityKind } from "@retro/crdt";
 import type { Phase, RejectReason, Role } from "@retro/protocol";
 
-export type StickerAction = "createSticker" | "createAction" | "editSticker" | "assignGroup";
+export type StickerAction =
+  | "createSticker"
+  | "createAction"
+  | "editSticker"
+  | "assignGroup"
+  | "moveSticker";
 
 /**
  * Какое действие представляет клиентская дельта, если T-011 вообще его
@@ -22,6 +27,13 @@ export type StickerAction = "createSticker" | "createAction" | "editSticker" | "
  * `write`-дельты (не `created`) узнать вид сущности — по имени поля
  * однозначно определить вид нельзя: `place`/`deleted` есть и у стикера, и
  * у группы; `text` — и у стикера, и у action item (§ 1.4 `consistency-model.md`).
+ *
+ * `place` классифицируется отдельно от `text`/`color`/`deleted`
+ * (`moveSticker`, не `editSticker`) — находка code-review, `fix/T-011-op-
+ * single-entity`: REQ-011/`CLAUDE.md` § 5 требуют, чтобы в фазе `group`
+ * можно было переместить ЛЮБОЙ стикер (как и назначить группу), а не
+ * только свой — правило владения у `place` отличается от `text`/`color`/
+ * `deleted` в зависимости от фазы (см. `checkPermission`).
  */
 export function classifyAction(state: State, delta: WireDelta): StickerAction | null {
   const [created] = delta.created;
@@ -35,7 +47,9 @@ export function classifyAction(state: State, delta: WireDelta): StickerAction | 
   const [entry] = delta.entries;
   if (!entry) return null;
   if (entityKind(state, entry.key.entity) !== "sticker") return null;
-  return entry.key.field === "group" ? "assignGroup" : "editSticker";
+  if (entry.key.field === "group") return "assignGroup";
+  if (entry.key.field === "place") return "moveSticker";
+  return "editSticker";
 }
 
 export interface CheckPermissionParams {
@@ -43,10 +57,12 @@ export interface CheckPermissionParams {
   readonly phase: Phase;
   readonly action: StickerAction;
   /**
-   * Только для `editSticker` — правит ли участник свою же сущность
-   * (`ops/authors.ts` `authorOf`). Для остальных действий не используется:
-   * `createSticker`/`createAction` — всегда «свой» по построению;
-   * `assignGroup` — REQ-011 не требует владения (любой стикер в фазе `group`).
+   * Для `editSticker` — всегда, и для `moveSticker` — только в фазе
+   * `collect` (в фазе `group` владение не проверяется, см. `checkPermission`):
+   * правит ли участник свою же сущность (`ops/authors.ts` `authorOf`). Для
+   * остальных действий не используется: `createSticker`/`createAction` —
+   * всегда «свой» по построению; `assignGroup` — REQ-011 не требует
+   * владения (любой стикер в фазе `group`).
    */
   readonly isOwn: boolean;
 }
@@ -63,6 +79,10 @@ export type CheckPermissionResult =
  *  - `editSticker`: фаза ∈ {collect, group} **и** `isOwn` (REQ-007/009) —
  *    фаза не подходит → `wrong_phase`; чужая сущность (даже в подходящей
  *    фазе) → `forbidden`;
+ *  - `moveSticker`: фаза ∈ {collect, group}; в `collect` — **и** `isOwn`
+ *    (до `reveal` чужие стикеры не видны, REQ-006), в `group` — владение не
+ *    требуется, любой стикер (REQ-011, находка code-review `fix/T-011-op-
+ *    single-entity`);
  *  - `assignGroup`: фаза === `group`, владение не требуется (REQ-011).
  */
 function reject(reason: RejectReason, message: string): CheckPermissionResult {
@@ -91,6 +111,17 @@ export function checkPermission(params: CheckPermissionParams): CheckPermissionR
         return reject("wrong_phase", `editSticker not allowed in phase ${phase}`);
       }
       if (!isOwn) return reject("forbidden", "participant can only edit their own sticker");
+      return { ok: true };
+    case "moveSticker":
+      if (phase !== "collect" && phase !== "group") {
+        return reject("wrong_phase", `moveSticker not allowed in phase ${phase}`);
+      }
+      // В group — любой стикер (REQ-011); в collect владение ещё нужно
+      // (чужие стикеры до reveal и так не видны, REQ-006 — это лишь defence
+      // in depth, не единственная защита).
+      if (phase === "collect" && !isOwn) {
+        return reject("forbidden", "participant can only move their own sticker in collect phase");
+      }
       return { ok: true };
     case "assignGroup":
       if (phase !== "group") {

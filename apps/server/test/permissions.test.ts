@@ -35,6 +35,7 @@ import {
   dotKey,
   empty,
   merge,
+  move,
   newClock,
   setColor,
   setField,
@@ -371,5 +372,116 @@ describe("classifyAction: распознаёт действие по дельт�
     const stateWithVote = merge(state, voted.delta);
     const unvoted = unvote(stateWithVote, voted.dot, stickerId);
     expect(classifyAction(stateWithVote, toWire(unvoted))).toBeNull();
+  });
+
+  it("REQ-011 (находка 2 code-review): move(...) на существующий стикер классифицируется как moveSticker, не editSticker и не null", () => {
+    const actor = newActor();
+    const created = createSticker(empty(), newClock(actor), {
+      column: "start",
+      frac: "m",
+      text: "hello",
+      color: "yellow",
+    });
+    const stickerId = dotKey(created.dot) as EntityId;
+    const state = created.delta as State;
+    const moved = move(state, created.clock, stickerId, { column: "stop", frac: "n" });
+    const action = classifyAction(state, toWire(moved.delta));
+    expect(action).toBe("moveSticker");
+    expect(action).not.toBe("editSticker");
+    expect(action).not.toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// owner/facilitator/viewer — moveSticker: полные права владельцу/фасилитатору,
+// viewer всегда forbidden (как и у остальных действий, см. выше)
+// ---------------------------------------------------------------------------
+
+describe("REQ-011: owner/facilitator/viewer — перемещение стикера (moveSticker)", () => {
+  it.each<Role>(["owner", "facilitator"])(
+    "%s: ok:true для moveSticker в любой фазе независимо от владения",
+    (role) => {
+      for (const phase of ALL_PHASES) {
+        for (const isOwn of [true, false]) {
+          expectAllowed(checkPermission({ role, phase, action: "moveSticker", isOwn }));
+        }
+      }
+    },
+  );
+
+  it("viewer не может переместить стикер ни в одной фазе, даже свой", () => {
+    for (const phase of ALL_PHASES) {
+      for (const isOwn of [true, false]) {
+        expectDenied(
+          checkPermission({ role: "viewer", phase, action: "moveSticker", isOwn }),
+          "forbidden",
+        );
+      }
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// participant — moveSticker: REQ-011, находка 2 code-review
+// (docs/security/permissions.md § «Исправление») — фаза collect по-прежнему
+// требует владения (REQ-006, defence in depth), фаза group — НЕ требует
+// владения вовсе (владение игнорируется), остальные фазы — wrong_phase.
+// ---------------------------------------------------------------------------
+
+describe("REQ-011: participant — перемещение стикера ограничено фазой, владение нужно только в collect (находка 2 code-review)", () => {
+  it("participant может переместить свой стикер в фазе collect", () => {
+    expectAllowed(
+      checkPermission({
+        role: "participant",
+        phase: "collect",
+        action: "moveSticker",
+        isOwn: true,
+      }),
+    );
+  });
+
+  it("REQ-006: participant не может переместить чужой стикер в фазе collect — forbidden (владение всё ещё нужно до reveal)", () => {
+    expectDenied(
+      checkPermission({
+        role: "participant",
+        phase: "collect",
+        action: "moveSticker",
+        isOwn: false,
+      }),
+      "forbidden",
+    );
+  });
+
+  it("participant может переместить свой стикер в фазе group", () => {
+    expectAllowed(
+      checkPermission({
+        role: "participant",
+        phase: "group",
+        action: "moveSticker",
+        isOwn: true,
+      }),
+    );
+  });
+
+  it("REQ-011 (находка 2 code-review): participant может переместить ЧУЖОЙ стикер в фазе group — владение не требуется", () => {
+    expectAllowed(
+      checkPermission({
+        role: "participant",
+        phase: "group",
+        action: "moveSticker",
+        isOwn: false,
+      }),
+    );
+  });
+
+  it("participant не может переместить стикер вне collect/group — wrong_phase, независимо от владения", () => {
+    for (const phase of otherPhases(["collect", "group"])) {
+      for (const isOwn of [true, false]) {
+        expectDenied(
+          checkPermission({ role: "participant", phase, action: "moveSticker", isOwn }),
+          "wrong_phase",
+        );
+      }
+    }
   });
 });
