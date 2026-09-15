@@ -11,6 +11,7 @@ import {
   createGroup,
   createSticker,
   deleteEntity,
+  dotKey,
   editText,
   empty,
   fromWire,
@@ -129,6 +130,67 @@ function dotEquals(a: Dot, b: Dot): boolean {
   return a.actor === b.actor && a.counter === b.counter;
 }
 
+/** Ключ ячейки+dot для сопоставления `supersedes` с записями `R` (ADR-0010, зависимость (в)). */
+function entryKey(entity: string, field: string, dot: Dot): string {
+  return `${entity}|${field}|${dotKey(dot)}`;
+}
+
+/** Наибольшая метка среди видимых записей `state` — то, к чему откатываются часы при `reject` (ADR-0010, п. 4). */
+function maxLamportOf(state: State): number {
+  let max = 0;
+  for (const entry of state.entries.values()) {
+    if (entry.stamp.lamport > max) max = entry.stamp.lamport;
+  }
+  return max;
+}
+
+/**
+ * Множество `R` (ADR-0010): сущности, ячейки и голоса, «принесённые» уже
+ * отклонённой/каскадно удаляемой частью очереди — растёт по мере обхода.
+ * Отдельно от `PendingEntry`, потому что накапливает данные и уже
+ * КАСКАДНО удалённых элементов (они больше не лежат в `pending`).
+ */
+interface RejectClosure {
+  readonly createdIds: Set<string>;
+  readonly entryKeys: Set<string>;
+  readonly voteDotKeys: Set<string>;
+}
+
+function extendClosure(closure: RejectClosure, entry: PendingEntry): void {
+  for (const created of entry.delta.created) closure.createdIds.add(created.id);
+  for (const record of entry.delta.entries) {
+    closure.entryKeys.add(entryKey(record.key.entity, record.key.field, record.dot));
+  }
+  for (const voteEntry of entry.delta.votes) closure.voteDotKeys.add(dotKey(voteEntry.dot));
+}
+
+/** (а)/(б) ADR-0010 — `π` ссылается на сущность или голос, принесённые `R`; удаляется насовсем, не пересобирается. */
+function dependsOnEntityOrVote(closure: RejectClosure, entry: PendingEntry): boolean {
+  const { delta } = entry;
+  return (
+    delta.entries.some(
+      (record) =>
+        closure.createdIds.has(record.key.entity) ||
+        (record.key.field === "group" &&
+          typeof record.value === "string" &&
+          closure.createdIds.has(record.value)),
+    ) ||
+    delta.votes.some((voteEntry) => closure.createdIds.has(voteEntry.target)) ||
+    delta.unvotes.some(
+      (unvoteEntry) =>
+        closure.createdIds.has(unvoteEntry.target) ||
+        closure.voteDotKeys.has(dotKey(unvoteEntry.dot)),
+    )
+  );
+}
+
+/** (в) ADR-0010 — `π` перекрывает запись, внесённую `R`; пересобирается заново из своего `intent`. */
+function dependsOnSupersede(closure: RejectClosure, entry: PendingEntry): boolean {
+  return entry.delta.supersedes.some((supersede) =>
+    closure.entryKeys.has(entryKey(supersede.key.entity, supersede.key.field, supersede.dot)),
+  );
+}
+
 export function createSyncClient(config: SyncClientConfig, ports: ClientCorePorts): SyncClient {
   const actorId = ports.newActorId();
   const maxPending = config.maxPending ?? DEFAULT_MAX_PENDING;
@@ -160,6 +222,60 @@ export function createSyncClient(config: SyncClientConfig, ports: ClientCorePort
     pending = [...pending.slice(0, index), ...pending.slice(index + 1)];
     saveOutbox();
     return entry ?? null;
+  }
+
+  /**
+   * `reject(δ)` (ADR-0010, `consistency-model.md` § 6): удаляет `δ`, закрывает
+   * очередь от ссылок на неё — зависимые по сущности/голосу удаляются
+   * каскадом, зависимые только по перекрытию пересобираются в конец очереди
+   * из своего `intent` — и откатывает часы Lamport. `null`, если `dot` уже
+   * не в `P` (повтор/устаревший ответ) — тогда ничего не меняется.
+   */
+  function processReject(dot: Dot, reason: RejectReason): string[] {
+    const entry = takeFirstMatch(dot);
+    if (!entry) return [];
+    rejections = [...rejections, { dot, reason }];
+
+    const closure: RejectClosure = {
+      createdIds: new Set(),
+      entryKeys: new Set(),
+      voteDotKeys: new Set(),
+    };
+    extendClosure(closure, entry);
+
+    const survivors: PendingEntry[] = [];
+    const toReassemble: PendingEntry[] = [];
+    for (const candidate of pending) {
+      if (dependsOnEntityOrVote(closure, candidate)) {
+        rejections = [...rejections, { dot: candidate.dot, reason, cause: entry.dot }];
+        extendClosure(closure, candidate);
+      } else if (dependsOnSupersede(closure, candidate)) {
+        toReassemble.push(candidate);
+        extendClosure(closure, candidate);
+      } else {
+        survivors.push(candidate);
+      }
+    }
+
+    // Часы — к максимуму того, что реально осталось видно, ДО пересборки
+    // (ADR-0010, п. 4): иначе метка следующей операции считалась бы от
+    // раздутого clock.lamport, накопленного уже удалённым/отклонённым.
+    pending = survivors;
+    clock = { ...clock, lamport: maxLamportOf(viewState()) };
+
+    const reassembled: PendingEntry[] = [];
+    for (const candidate of toReassemble) {
+      const built = buildEntry(viewState(), clock, candidate.intent, voterToken);
+      clock = built.clock;
+      const next: PendingEntry = { ...built.entry, intent: candidate.intent };
+      pending = [...pending, next];
+      reassembled.push(next);
+    }
+    saveOutbox();
+
+    return status === "welcomed"
+      ? reassembled.map((next) => JSON.stringify({ type: "op", delta: next.delta }))
+      : [];
   }
 
   function connected(): string[] {
@@ -237,11 +353,8 @@ export function createSyncClient(config: SyncClientConfig, ports: ClientCorePort
         if (entry) confirmed = merge(confirmed, fromWire(entry.delta));
         return [];
       }
-      case "reject": {
-        const entry = takeFirstMatch(parsed.dot);
-        if (entry) rejections = [...rejections, { dot: parsed.dot, reason: parsed.reason }];
-        return [];
-      }
+      case "reject":
+        return processReject(parsed.dot, parsed.reason);
       case "meta":
         meta = parsed.meta;
         return [];

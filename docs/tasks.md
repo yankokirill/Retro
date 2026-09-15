@@ -62,7 +62,7 @@
 ### T-028: Ядро клиента `packages/client-core` (первый шаг T-005)
 
 - **REQ:** REQ-023 (кр. 1–3), REQ-024 (кр. 1, 3–5)
-- **Статус:** in-progress — ветка `feat/T-028-client-core`, исправление находок code-review (ADR-0010)
+- **Статус:** review — ветка `feat/T-028-client-core`
 - **Размер:** M
 - **Зависит от:** T-009 (протокол и сервер уже есть)
 - **Затрагивает:** packages/client-core (новый)

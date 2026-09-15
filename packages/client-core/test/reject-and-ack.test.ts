@@ -162,7 +162,7 @@ describe("H3 (simulator.md § 12) — vote и его unvote делят один 
     expect(cardAfter.votes).toBe(0);
   });
 
-  it("H3: reject(dot) на паре vote/unvote с общим dot убирает ПЕРВЫЙ элемент (vote), второй ack на тот же dot после этого матчит unvote, без исключений", () => {
+  it("H3: reject(dot) на паре vote/unvote с общим dot — по ADR-0010 unvote отклонённого голоса удаляется каскадом (сервер не может породить ack на отзыв отклонённого голоса, V7 not_own_vote), устаревший ответ на тот же dot после этого игнорируется без исключений", () => {
     const { client } = welcomedClient();
 
     const created = client.act(stickerIntent("s", "цель для голосования"));
@@ -182,15 +182,20 @@ describe("H3 (simulator.md § 12) — vote и его unvote делят один 
     );
 
     const afterReject = client.inspect();
-    expect(afterReject.pending).toHaveLength(1);
-    expect(afterReject.pending[0]?.kind).toBe("unvote");
-    expect(afterReject.rejections).toEqual([{ dot: voteDot, reason: "vote_limit" }]);
+    // ADR-0010, п. 1(б): unvote голоса, поданного отклонённой дельтой, зависит от неё
+    // и удаляется из P насовсем (не пересобирается) — очередь полностью пуста.
+    expect(afterReject.pending).toEqual([]);
+    expect(afterReject.rejections).toEqual([
+      { dot: voteDot, reason: "vote_limit" },
+      { dot: voteDot, reason: "vote_limit", cause: voteDot },
+    ]);
 
-    // Второй ответ сервера на тот же dot (теперь это ack на unvote, ADR-0008) —
-    // матчит оставшийся элемент, не бросает исключение.
+    // Устаревший ответ сервера на тот же dot — в P уже нет элемента с этим dot,
+    // игнор без исключения (ADR-0010 п. 5).
     expect(() =>
       client.receive(JSON.stringify({ type: "ack", dot: voteDot, seq: 5 })),
     ).not.toThrow();
-    expect(client.inspect().pending).toHaveLength(0);
+    expect(client.inspect().pending).toEqual([]);
+    expect(client.inspect().rejections).toEqual(afterReject.rejections);
   });
 });
