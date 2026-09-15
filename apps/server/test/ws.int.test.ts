@@ -780,3 +780,130 @@ describe("REQ-016: сброс голосов освобождает лимит �
     wsParticipant.close();
   });
 });
+
+// ---------------------------------------------------------------------------
+// REQ-022 — почему два теста T-012 выше («две вкладки... I6» и «owner
+// сбрасывает голоса...») в принципе могут прочитать НЕ тот тип сообщения,
+// какой ждут первым: протокол рассылает `op` ВСЕМ подписчикам доски, кроме
+// автора операции (docs/spec/protocol.md § 6 «Операция»: «остальным — op в
+// их проекции»). Подписчик, который сам ничего не отправлял (или ждёт свой
+// ack/reject), может получить чужой `op` первым или вперемешку со своим
+// ответом — в том числе от ДРУГОЙ вкладки того же guestId, потому что это
+// два разных WS-соединения (два разных actorId), оба подписаны на доску.
+//
+// Тесты ниже НЕ про баг реализации — они зелёные и подтверждают, что
+// рассылка действительно работает как специфицировано. Они объясняют, какое
+// предположение молчаливо делают соседние тесты T-012 (читают ровно одно
+// следующее сообщение и считают его своим ack/reject), не учитывая лишние
+// сообщения из общей подписки на доску. Сами эти тесты не исправляются
+// здесь — отдельный следующий шаг.
+// ---------------------------------------------------------------------------
+
+describe("REQ-022: op-рассылка чужой операции доходит до подписчика независимо от того, ждёт ли он свой ack/reject", () => {
+  it("REQ-022: участник A, который ничего не отправлял, получает op-рассылку голоса участника B той же доски", async () => {
+    const { boardId, ownerId, participantLink } = await newBoardWithLinks(3);
+    const stickerId = await ownerCreatesStickerAndEntersVotePhase(boardId, ownerId);
+
+    const guestA = newGuestId();
+    const guestB = newGuestId();
+    await joinByLink(db, { linkToken: participantLink, guestId: guestA, displayName: "A" });
+    await joinByLink(db, { linkToken: participantLink, guestId: guestB, displayName: "B" });
+
+    const wsA = await connect(boardId);
+    const wsB = await connect(boardId);
+    const readerA = messageReader(wsA);
+    const readerB = messageReader(wsB);
+
+    const actorA = newActorId();
+    const actorB = newActorId();
+    sendHello(wsA, { guestId: guestA, displayName: "A", actorId: actorA });
+    sendHello(wsB, { guestId: guestB, displayName: "B", actorId: actorB });
+    const welcomeA = await readerA.next();
+    const welcomeB = await readerB.next();
+    expect(welcomeA.type).toBe("welcome");
+    expect(welcomeB.type).toBe("welcome");
+    if (welcomeA.type !== "welcome" || welcomeB.type !== "welcome") {
+      throw new Error("expected welcome on both connections");
+    }
+
+    // A голосует и дожидается своего ack — A теперь "в покое": ничего больше
+    // не отправляет и ничего своего не ждёт.
+    const voteA = vote(empty(), newClock(actorA), stickerId, welcomeA.voterToken);
+    wsA.send(JSON.stringify({ type: "op", delta: toWire(voteA.delta) }));
+    const ackA = await readerA.next();
+    expect(ackA.type).toBe("ack");
+
+    // B голосует за тот же стикер. A ничего не отправлял в этот момент — но
+    // A подписан на доску, поэтому первое, что A увидит дальше, — это именно
+    // op-рассылка голоса B, а не что-либо относящееся к собственному действию A.
+    const voteB = vote(empty(), newClock(actorB), stickerId, welcomeB.voterToken);
+    wsB.send(JSON.stringify({ type: "op", delta: toWire(voteB.delta) }));
+
+    const nextForA = await readerA.next();
+    expect(nextForA.type).toBe("op");
+    if (nextForA.type !== "op") throw new Error("expected op broadcast of B's vote to A");
+    expect(nextForA.delta.votes).toHaveLength(1);
+    expect(nextForA.delta.votes[0]?.dot).toEqual(voteB.dot);
+    expect(nextForA.delta.votes[0]?.target).toBe(stickerId);
+
+    wsA.close();
+    wsB.close();
+  });
+
+  it("REQ-022: другая вкладка того же guestId тоже получает op-рассылку голоса первой вкладки — broadcast идёт всем прочим подписчикам доски, не только «чужим» участникам", async () => {
+    const { boardId, ownerId, participantLink } = await newBoardWithLinks(3);
+    const stickerId = await ownerCreatesStickerAndEntersVotePhase(boardId, ownerId);
+
+    const guestId = newGuestId();
+    const joined = await joinByLink(db, {
+      linkToken: participantLink,
+      guestId,
+      displayName: "TwoTabs",
+    });
+    expect(joined?.role).toBe("participant");
+
+    const wsTab1 = await connect(boardId);
+    const wsTab2 = await connect(boardId);
+    const readerTab1 = messageReader(wsTab1);
+    const readerTab2 = messageReader(wsTab2);
+
+    const actorTab1 = newActorId();
+    const actorTab2 = newActorId();
+    sendHello(wsTab1, { guestId, displayName: "TwoTabs", actorId: actorTab1 });
+    sendHello(wsTab2, { guestId, displayName: "TwoTabs", actorId: actorTab2 });
+    const welcomeTab1 = await readerTab1.next();
+    const welcomeTab2 = await readerTab2.next();
+    expect(welcomeTab1.type).toBe("welcome");
+    expect(welcomeTab2.type).toBe("welcome");
+    if (welcomeTab1.type !== "welcome") throw new Error("expected welcome on tab 1");
+
+    // Только вкладка 1 голосует; вкладка 2 в этот момент ничего не отправляла
+    // и ничего своего не ждёт — она "просто подписана" на доску, как в
+    // существующих тестах T-012 выше (readerTab1/readerTab2 на две вкладки
+    // одного участника).
+    const voteTab1 = vote(empty(), newClock(actorTab1), stickerId, welcomeTab1.voterToken);
+    wsTab1.send(JSON.stringify({ type: "op", delta: toWire(voteTab1.delta) }));
+
+    // Вкладка 1 (автор операции) получает свой ack.
+    const ackTab1 = await readerTab1.next();
+    expect(ackTab1.type).toBe("ack");
+    if (ackTab1.type !== "ack") throw new Error("expected ack for tab 1's own vote");
+    expect(ackTab1.dot).toEqual(voteTab1.dot);
+
+    // Вкладка 2 — другое WS-соединение (другой actorId) того же guestId,
+    // тоже подписанное на доску: она получает op-рассылку голоса вкладки 1,
+    // хотя формально это "тот же участник" — рассылка не делает исключения
+    // для других соединений того же guestId.
+    const opForTab2 = await readerTab2.next();
+    expect(opForTab2.type).toBe("op");
+    if (opForTab2.type !== "op") {
+      throw new Error("expected op broadcast of tab 1's vote to tab 2 of the same guest");
+    }
+    expect(opForTab2.delta.votes).toHaveLength(1);
+    expect(opForTab2.delta.votes[0]?.dot).toEqual(voteTab1.dot);
+    expect(opForTab2.delta.votes[0]?.target).toBe(stickerId);
+
+    wsTab1.close();
+    wsTab2.close();
+  });
+});
