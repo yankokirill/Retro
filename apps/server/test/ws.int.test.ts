@@ -76,6 +76,31 @@ function messageReader(ws: WebSocket) {
   };
 }
 
+/**
+ * Ждёт следующее сообщение одного из `types`, пропуская по пути чужие
+ * `op`-рассылки. protocol.md § 6: сервер шлёт `op` всем подписчикам доски,
+ * кроме автора операции — подписчик, ожидающий ответ на СВОЁ сообщение
+ * (`ack`/`reject`/`commandResult`), может получить их вперемешку с чужими
+ * `op` (в т.ч. от другой вкладки того же guestId — см. REQ-022 тесты выше).
+ * Любой другой незапрошенный тип (`meta`/`welcome`/`error`) — не пропускаем:
+ * его появление означает реальную проблему, тест должен упасть на нём явно.
+ */
+async function nextOfType<T extends ServerMessage["type"]>(
+  reader: ReturnType<typeof messageReader>,
+  types: readonly T[],
+): Promise<Extract<ServerMessage, { type: T }>> {
+  for (;;) {
+    const msg = await reader.next();
+    if ((types as readonly string[]).includes(msg.type)) {
+      return msg as Extract<ServerMessage, { type: T }>;
+    }
+    if (msg.type === "op") continue;
+    throw new Error(
+      `nextOfType: unexpected message type "${msg.type}", expected one of [${types.join(", ")}]`,
+    );
+  }
+}
+
 function sendHello(
   ws: WebSocket,
   params: { guestId: string; displayName: string; actorId: string; lastSeq?: number | null },
@@ -608,8 +633,11 @@ describe("REQ-015 (кр. 6, I6): лимит голосов держится по
     wsTab1.send(JSON.stringify({ type: "op", delta: toWire(voteTab1.delta) }));
     wsTab2.send(JSON.stringify({ type: "op", delta: toWire(voteTab2.delta) }));
 
-    const resultTab1 = await readerTab1.next();
-    const resultTab2 = await readerTab2.next();
+    // "Следующий ack/reject" для каждой вкладки — а не буквально "следующее
+    // сообщение": проигравшая вкладка вдобавок получает op-рассылку голоса
+    // победившей (см. REQ-022 тесты выше, nextOfType пропускает её).
+    const resultTab1 = await nextOfType(readerTab1, ["ack", "reject"] as const);
+    const resultTab2 = await nextOfType(readerTab2, ["ack", "reject"] as const);
     const results = [resultTab1, resultTab2];
 
     const acks = results.filter((msg) => msg.type === "ack");
@@ -730,6 +758,16 @@ describe("REQ-016: сброс голосов освобождает лимит �
     const firstAck = await readerParticipant.next();
     expect(firstAck.type).toBe("ack");
     if (firstAck.type !== "ack") throw new Error("expected ack");
+
+    // Owner подписан на доску и не автор этой операции — до resetVotes он
+    // уже получает op-рассылку firstVote (protocol.md § 6). Если её не
+    // прочитать здесь явно, она останется в очереди перед сообщениями
+    // resetVotes ниже и собьёт последующий поиск commandResult (см. REQ-022
+    // тесты выше — та же причина).
+    const ownerSeesFirstVote = await readerOwner.next();
+    expect(ownerSeesFirstVote.type).toBe("op");
+    if (ownerSeesFirstVote.type !== "op") throw new Error("expected op broadcast of firstVote");
+    expect(ownerSeesFirstVote.delta.votes[0]?.dot).toEqual(firstVote.dot);
 
     // Подтверждаем, что лимит действительно исчерпан.
     const secondVote = vote(empty(), firstVote.clock, stickerId, voterToken);
