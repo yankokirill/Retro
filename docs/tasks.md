@@ -203,10 +203,14 @@
 ### T-024: Ядро сервера `packages/server-core`
 
 - **REQ:** infra
-- **Статус:** todo
+- **Статус:** in-progress — ветка `feat/T-024-server-core`
 - **Размер:** M
 - **Зависит от:** T-013, T-026
 - **Затрагивает:** packages/server-core (новый), apps/server (`ws/gateway.ts` → тонкий адаптер, `store/pg-store.ts`, реэкспорты в `ops/*`)
+- **Уточнения к `docs/design/T-005-simulator.md` § 3 (2026-09-15, при реализации):**
+  1. добавлен `opsUpTo` в порт `BoardStore` (появился в T-026 после написания дизайна);
+  2. `PgBoardStore` — тонкая обёртка над функциями `ops/log.ts`/`ops/authors.ts`/`boards/service.ts`, которые остаются на месте (их сигнатуру `(db, …)` напрямую использует `oplog.int.test.ts`/`boards.int.test.ts`); в `server-core` целиком переезжают только чистые модули без I/O;
+  3. тест SIM-05 (порядок `hello`/`op`/`reveal`, включая непокрытую red-тестом гонку из находки 1 PR #19) пишется уже здесь, на управляемом stub-хранилище, не дожидаясь `MemoryBoardStore` из T-025
 - **Готово, когда:** `docs/design/T-005-simulator.md` § 3 — `createBoardServer`, порт `BoardStore` (только хранение), `PgBoardStore`; каждое сообщение и отписка идут через очередь доски (SIM-05 — архитектурная замена временной заплатки T-026); контрактный набор `BoardStore` зелёный на Postgres; все существующие `test:int` зелёные без правки
 
 ### T-025: `MemoryBoardStore`

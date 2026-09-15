@@ -111,6 +111,8 @@ export interface BoardStore {
   findUnvoteSeq(boardId: string, voteDot: Dot, target: EntityId): Promise<number | null>;
   actorClock(boardId: string, actor: ActorId): Promise<ActorClock>;
   opsSince(boardId: string, sinceSeq: number): Promise<OpRow[]>;
+  /** T-026 (H1): операции со seq <= uptoSeq — досылка гостю при reveal-переподключении. */
+  opsUpTo(boardId: string, uptoSeq: number): Promise<OpRow[]>;
   /** Последний seq доски (0, если журнал пуст) — для revealSeq. */
   lastSeq(boardId: string): Promise<number>;
   latestSnapshot(boardId: string): Promise<SnapshotRecord | null>;
@@ -132,6 +134,8 @@ export interface BoardStoreTx {
 
 `ActorClock`, `OpRow`, `AppendOpParams`, `ReplayResult`, `SnapshotRecord` переезжают из `apps/server/src/ops/log.ts` в `server-core/src/store.ts` (в `log.ts` — `export type` реэкспорт).
 
+**Уточнение (2026-09-15, T-024, при реализации):** функции-тела `ops/log.ts`, `ops/authors.ts` и `boards/service.ts` (доступ к Postgres) **остаются на месте**, а не переезжают в `server-core/src/pg-store.ts` буквально — `apps/server/test/oplog.int.test.ts` и `boards.int.test.ts` импортируют их напрямую по сигнатуре `(db, …)`, и критерий готовности T-024 требует «все существующие `test:int` зелёные без правки». `PgBoardStore` — тонкая обёртка (`class PgBoardStore implements BoardStore`), делегирующая этим функциям; типы (`ActorClock`, `OpRow`, …) всё равно переезжают в `store.ts`, в `ops/log.ts` — реэкспорт. В `server-core` целиком переезжают только чистые модули без I/O: `validate.ts`, `permissions.ts`, `votes.ts`, `visibility.ts`, `board-queue.ts` (→ `queue.ts`).
+
 ### 3.3 Устройство ядра
 
 ```text
@@ -151,6 +155,8 @@ test/
   memory-store.test.ts
   board-server.test.ts ядро на MemoryBoardStore: порядок hello→op (H2), close в очереди, error+close
 ```
+
+**Уточнение (2026-09-15, T-024):** `MemoryBoardStore` появляется только в T-025, а `board-server.test.ts` (SIM-05, порядок `hello`/`op`/`reveal`) нужен уже в T-024 — критерий готовности требует «каждое сообщение и отписка идут через очередь доски» проверенным здесь, не отложенным. Тест-автор пишет его на маленьком управляемом stub-хранилище (управляемые промисы `board()`/`lastSeq()`, без CRDT-состояния — только то, что нужно `hello`/`op`/`command` для маршрутизации), не на `MemoryBoardStore`. Тем же файлом проверяется гонка **находки 1 code-review PR #19** (T-026), которая осталась без red-теста именно потому, что требовала реального переплетения двух I/O — здесь, на синхронном ядре, оба порядка (`hello` до/после `reveal` другого соединения) воспроизводятся детерминированно.
 
 Handlers — это перенос тел веток `gateway.ts` почти построчно: `send(socket, m)` превращается в `out.push({to, raw: JSON.stringify(m)})`, `deps.db` — в `store`, `boardsService.*` — в `store.board/memberRole` + `rules/board.ts`. Порядок проверок и тексты `reason` не меняются.
 
