@@ -165,4 +165,18 @@ export const clientDeltaSchema = z
         ),
       ),
     "every supersede must refer to the cell written by this delta",
-  );
+  )
+  .refine((delta) => {
+    // V2 (docs/spec/consistency-model.md § 7, уточнено code-review): каждая
+    // операция §3.1 по построению пишет ровно в одну сущность — общий dot
+    // (проверка выше) НЕ означает общую entity, ничто иное не мешает
+    // склеить в одну дельту записи двух сущностей под одним dot. Без этой
+    // проверки classifyAction/isOwn (V6, ops/permissions.ts), которые
+    // смотрят только на первую запись, пропускали бы вторую (чужую) запись
+    // без проверки прав вообще.
+    const entities = new Set<string>([
+      ...delta.created.map((created) => created.id),
+      ...delta.entries.map((entry) => entry.key.entity),
+    ]);
+    return entities.size <= 1;
+  }, "delta must touch exactly one entity");
