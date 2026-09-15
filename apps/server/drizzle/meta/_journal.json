@@ -57,6 +57,13 @@
       "when": 1789401377963,
       "tag": "0007_wet_mad_thinker",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1789482594287,
+      "tag": "0008_lucky_dexter_bennett",
+      "breakpoints": true
     }
   ]
 }

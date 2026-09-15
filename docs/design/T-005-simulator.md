@@ -434,8 +434,8 @@ generateIntent(world, client, prng):
 
 | Задача | Суть | Зависит от | REQ | Размер |
 |---|---|---|---|---|
-| **T-026** | H1: красный `ws.int.test.ts` (переподключение после `reveal`), затем исправление по ВС-2 (б): `boards.reveal_seq`, миграция, `welcome` досылает `projectHidden` строк `≤ min(lastSeq, revealSeq)`. H2: красный интеграционный тест `hello`+`op` подряд; исправление — в T-024 | T-013 | REQ-006, REQ-023 | S |
-| **T-024** | `packages/server-core`: перенос правил и хендлеров, порт `BoardStore`, `PgBoardStore`, тонкий gateway, контрактный набор на Postgres. Поведение не меняется, кроме H2 (все `test:int` зелёные без правки) | T-013, T-026 | infra | M |
+| **T-026** | H1: красный `ws.int.test.ts` (переподключение после `reveal`), затем исправление по ВС-2 (б): `boards.reveal_seq`, миграция, `welcome` досылает `projectHidden` строк `≤ min(lastSeq, revealSeq)`. H2: красный интеграционный тест `hello`+`op` подряд, затем исправление — сообщения одного соединения сериализуются (минимальная заплатка; правило 2 `CLAUDE.md` не даёт смёржить постоянно красный тест) | T-013 | REQ-006, REQ-023 | S |
+| **T-024** | `packages/server-core`: перенос правил и хендлеров, порт `BoardStore`, `PgBoardStore`, тонкий gateway, контрактный набор на Postgres. Поведение не меняется (H1/H2 уже исправлены в T-026; здесь временная заплатка H2 заменяется архитектурной гарантией SIM-05, все `test:int` зелёные без правки) | T-013, T-026 | infra | M |
 | **T-025** | `MemoryBoardStore` + тот же контрактный набор в `test:unit` + тесты ядра на нём (`board-server.test.ts`) | T-024 | infra | S |
 | **T-028** | **первый шаг:** ядро клиента `packages/client-core` по контракту § 4; порт хранилища очереди с реализацией в памяти | T-009 | REQ-023, REQ-024 | M |
 | **T-014** (сужена) | `apps/web`: адаптеры WebSocket и IndexedDB над `client-core`, ADR по ВС-1 | T-028 | REQ-002 | M |

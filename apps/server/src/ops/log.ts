@@ -4,7 +4,7 @@
 
 import type { Dot, EntityId, State, WireDelta } from "@retro/crdt";
 import { compact as compactState, empty, fromWire, merge, toWire } from "@retro/crdt";
-import { and, asc, desc, eq, gt, max, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, lte, max, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "../db/schema.js";
 import { ops, snapshots } from "../db/schema.js";
@@ -177,6 +177,20 @@ export async function opsSince(db: Db, boardId: string, sinceSeq: number): Promi
     .select({ seq: ops.seq, delta: ops.delta })
     .from(ops)
     .where(and(eq(ops.boardId, boardId), gt(ops.seq, sinceSeq)))
+    .orderBy(asc(ops.seq));
+}
+
+/**
+ * Операции доски со `seq <= uptoSeq`, по возрастанию `seq` — T-026 (H1,
+ * ВС-2(б) `docs/spec/simulator.md` § 13): досылка гостю, чей `lastSeq`
+ * старше `reveal`, строк, скрытых от него во время `collect` и потому не
+ * покрытых обычным хвостом `opsSince(lastSeq)` (у них `seq <= lastSeq`).
+ */
+export async function opsUpTo(db: Db, boardId: string, uptoSeq: number): Promise<OpRow[]> {
+  return db
+    .select({ seq: ops.seq, delta: ops.delta })
+    .from(ops)
+    .where(and(eq(ops.boardId, boardId), lte(ops.seq, uptoSeq)))
     .orderBy(asc(ops.seq));
 }
 
