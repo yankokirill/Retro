@@ -189,7 +189,7 @@
 ### T-026: Досылка после `reveal` при переподключении; `op` сразу после `hello`
 
 - **REQ:** REQ-006 (кр. 3), REQ-023 (кр. 2)
-- **Статус:** in-progress — ветка `feat/T-026-reveal-catchup-reconnect`
+- **Статус:** review — ветка `feat/T-026-reveal-catchup-reconnect`
 - **Размер:** S
 - **Зависит от:** T-013
 - **Затрагивает:** apps/server (миграция `boards.reveal_seq`, `welcome`, обработчик сообщений соединения), docs/spec/protocol.md

@@ -317,6 +317,82 @@ describe("REQ-002: hello постороннего guestId отклоняется
 });
 
 // ---------------------------------------------------------------------------
+// T-026, H1/H2 (`docs/spec/simulator.md` § 12) — две настоящие ошибки текущего
+// кода, найденные анализом (не прогоном) при проектировании T-005. Обе должны
+// давать красные тесты ДО исправления апрель-2026.
+//
+// H2: `hello` ждёт `getBoardForGuest` (async) прежде, чем проставить внутреннее
+// состояние подписки соединения; если вторым сообщением того же соединения,
+// не дожидаясь `welcome`, сразу отправить `op`, он может попасть на обработчик
+// раньше, чем `hello` успеет завершиться — сервер тогда отвечает
+// `error {reason: "invalid_shape", message: "first message must be hello"}`
+// и закрывает соединение. Правильно: оба сообщения обрабатываются по порядку
+// (`hello` → `welcome`, `op` → `ack`/`reject`), соединение не закрывается.
+// Гонка не гарантированно проявляется на первой попытке — повторяем на
+// нескольких новых соединениях.
+// ---------------------------------------------------------------------------
+
+describe("REQ-023 (кр. 2), H2: op сразу после hello (без ожидания welcome) не рвёт соединение", () => {
+  it("REQ-023 (кр. 2), H2: op вторым сообщением того же соединения, отправленный без await после hello, получает ack/reject, а не error — соединение остаётся открытым", async () => {
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const { boardId, ownerId } = await newBoardWithOwner();
+      const ws = await connect(boardId);
+      const reader = messageReader(ws);
+
+      let closedByServer = false;
+      ws.on("close", () => {
+        closedByServer = true;
+      });
+
+      const actorId = newActorId();
+      const created = createSticker(empty(), newClock(actorId), {
+        column: "start",
+        frac: "1",
+        text: `H2 attempt ${attempt}`,
+        color: "yellow",
+      });
+
+      // Ключевое условие гонки: НЕТ `await` между `hello` и `op` — оба уходят
+      // в канал друг за другом в одном тике, до какого-либо ответа сервера.
+      sendHello(ws, { guestId: ownerId, displayName: "Owner", actorId });
+      ws.send(JSON.stringify({ type: "op", delta: toWire(created.delta) }));
+
+      let sawWelcome = false;
+      let sawAckOrReject = false;
+      for (let i = 0; i < 2; i++) {
+        const msg = await reader.next();
+        if (msg.type === "welcome") {
+          sawWelcome = true;
+        } else if (msg.type === "ack" || msg.type === "reject") {
+          sawAckOrReject = true;
+        } else {
+          throw new Error(
+            `H2 (attempt ${attempt}): unexpected message "${msg.type}" — ожидались только welcome и ack/reject, не error/закрытие`,
+          );
+        }
+      }
+      expect(sawWelcome).toBe(true);
+      expect(sawAckOrReject).toBe(true);
+      expect(closedByServer).toBe(false);
+
+      // Соединение действительно живо: ещё один валидный op ПОСЛЕ welcome
+      // (обычным путём, с ожиданием) тоже получает ack.
+      const created2 = createSticker(empty(), created.clock, {
+        column: "start",
+        frac: "2",
+        text: `H2 attempt ${attempt} - proof of life`,
+        color: "yellow",
+      });
+      ws.send(JSON.stringify({ type: "op", delta: toWire(created2.delta) }));
+      const proof = await reader.next();
+      expect(proof.type).toBe("ack");
+
+      ws.close();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // REQ-024 — правило приёма V3 сквозь весь пайплайн: семантически некорректная
 // операция (правка несуществующей сущности) возвращается автору как `reject`
 // с reason "unknown_target" по настоящему WS-соединению, а не просто из
@@ -1988,6 +2064,130 @@ describe("REQ-004 (кр. 1) + REQ-006 (кр. 3): reveal раскрывает а�
 
     wsOwner.close();
     wsParticipant.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-026, H1 (`docs/spec/simulator.md` § 12) — смежный, но ДРУГОЙ сценарий,
+// чем блок выше: там участник ПОДКЛЮЧЁН в момент reveal (живая досылка
+// `sendRevealCatchup`). Здесь участник в момент reveal ОТКЛЮЧЁН, и его
+// собственный `lastSeq` (от `ack` на СВОЙ же видимый стикер) уже больше,
+// чем `seq` чужого скрытого стикера — потому что `seq` общий на доску и у
+// него бывают "пропуски" для скрытых от этого участника строк. При
+// переподключении ПОСЛЕ reveal `welcomeData` сейчас отдаёт только строки с
+// `seq > lastSeq`, и скрытый стикер навсегда пропадает для этого участника
+// (`docs/spec/simulator.md` § 12, H1; ВС-2(б) — `boards.reveal_seq`).
+// ---------------------------------------------------------------------------
+
+describe("REQ-006 (кр. 3), REQ-023 (кр. 2), H1: переподключение ПОСЛЕ reveal с уже продвинутым lastSeq не должно терять ранее скрытый стикер", () => {
+  it("REQ-006 кр.3 / REQ-023 кр.2 (H1): Bob был отключён в момент reveal, его lastSeq больше seq скрытого стикера Owner'а — после переподключения стикер всё равно приходит (welcome.snapshot или welcome.ops), автор виден", async () => {
+    const { boardId, ownerId, participantLink } = await newBoardWithOwner();
+
+    const participantId = newGuestId();
+    const joined = await joinByLink(db, {
+      linkToken: participantLink,
+      guestId: participantId,
+      displayName: "Bob",
+    });
+    expect(joined?.role).toBe("participant");
+
+    const wsOwner = await connect(boardId);
+    const wsBob = await connect(boardId);
+    const readerOwner = messageReader(wsOwner);
+    const readerBob = messageReader(wsBob);
+
+    const ownerActorId = newActorId();
+    const bobActorId = newActorId();
+    sendHello(wsOwner, { guestId: ownerId, displayName: "Owner", actorId: ownerActorId });
+    sendHello(wsBob, { guestId: participantId, displayName: "Bob", actorId: bobActorId });
+    expect((await readerOwner.next()).type).toBe("welcome");
+    expect((await readerBob.next()).type).toBe("welcome");
+
+    // Owner создаёт стикер, скрытый от Bob, пока доска в collect (REQ-006 кр.1) —
+    // его seq меньше, чем у следующей строки, которую увидит Bob.
+    const hidden = createSticker(empty(), newClock(ownerActorId), {
+      column: "start",
+      frac: "1",
+      text: "hidden from Bob until reveal",
+      color: "yellow",
+    });
+    wsOwner.send(JSON.stringify({ type: "op", delta: toWire(hidden.delta) }));
+    expect((await readerOwner.next()).type).toBe("ack");
+    const hiddenStickerId = dotKey(hidden.dot) as EntityId;
+
+    // Bob создаёt СВОЙ стикер (сам себе виден) ПОСЛЕ — доска обрабатывает
+    // операции по FIFO (T-012), поэтому его ack.seq строго больше seq
+    // скрытой строки owner'а. Это и есть "продвинутый lastSeq" из H1.
+    const bobsOwn = createSticker(empty(), newClock(bobActorId), {
+      column: "start",
+      frac: "2",
+      text: "Bob's own sticker",
+      color: "green",
+    });
+    wsBob.send(JSON.stringify({ type: "op", delta: toWire(bobsOwn.delta) }));
+    const bobAck = await readerBob.next();
+    expect(bobAck.type).toBe("ack");
+    if (bobAck.type !== "ack") throw new Error("expected ack");
+    const bobLastSeq = bobAck.seq;
+
+    // Bob отключается ДО reveal, запомнив bobLastSeq (это делает клиент
+    // реально, здесь эмулируется передачей lastSeq в hello при переподключении).
+    let bobClosed = false;
+    wsBob.on("close", () => {
+      bobClosed = true;
+    });
+    wsBob.close();
+    await new Promise<void>((resolve) => {
+      if (bobClosed) return resolve();
+      wsBob.on("close", () => resolve());
+      setTimeout(resolve, 2000);
+    });
+
+    // Первый уход из collect — reveal (REQ-004 кр.1). Bob к этому моменту
+    // без соединения — `sendRevealCatchup` (живая досылка) его не застаёт.
+    wsOwner.send(
+      JSON.stringify({
+        type: "command",
+        id: "cmd-reveal-h1",
+        command: { type: "setPhase", phase: "group" },
+      }),
+    );
+    const ownerFirst = await readerOwner.next();
+    const ownerSecond = await readerOwner.next();
+    const ownerCommandResult = [ownerFirst, ownerSecond].find((m) => m.type === "commandResult");
+    expect(ownerCommandResult?.type).toBe("commandResult");
+    if (ownerCommandResult?.type !== "commandResult") throw new Error("expected commandResult");
+    expect(ownerCommandResult.ok).toBe(true);
+
+    // Bob переподключается ПОСЛЕ reveal с уже продвинутым lastSeq.
+    const wsBob2 = await connect(boardId);
+    const readerBob2 = messageReader(wsBob2);
+    sendHello(wsBob2, {
+      guestId: participantId,
+      displayName: "Bob",
+      actorId: newActorId(),
+      lastSeq: bobLastSeq,
+    });
+    const welcomeBob2 = await readerBob2.next();
+    expect(welcomeBob2.type).toBe("welcome");
+    if (welcomeBob2.type !== "welcome") throw new Error("expected welcome");
+
+    // H1: ранее скрытый стикер owner'а обязан дойти до Bob хоть сейчас — в
+    // snapshot (если бы он был; сознательно не делаем saveSnapshot здесь,
+    // задача T-026) или в хвосте `ops`. Единственный реальный источник тут — `ops`.
+    const seenInSnapshot =
+      welcomeBob2.snapshot?.state.created.some((c) => c.id === hiddenStickerId) ?? false;
+    const seenInOps = welcomeBob2.ops.some((op) =>
+      op.delta.created.some((c) => c.id === hiddenStickerId),
+    );
+    expect(seenInSnapshot || seenInOps).toBe(true);
+
+    // Автор ранее скрытого стикера тоже должен быть виден после reveal (REQ-006 кр.3).
+    expect(welcomeBob2.meta.revealed).toBe(true);
+    expect(welcomeBob2.meta.authors[hiddenStickerId]).toBe("Owner");
+
+    wsOwner.close();
+    wsBob2.close();
   });
 });
 

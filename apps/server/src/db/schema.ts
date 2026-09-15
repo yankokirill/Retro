@@ -39,6 +39,12 @@ export const boards = pgTable("boards", {
   viewerLinkToken: uuid("viewer_link_token").notNull().defaultRandom().unique(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   deletedAt: timestamp("deleted_at", { withTimezone: true }),
+  // T-026, ВС-2(б) (docs/spec/simulator.md § 13, H1): seq доски на момент
+  // первого ухода из collect (reveal); null, пока доска ещё в collect.
+  // Позволяет welcome досылать переподключившемуся гостю строки, скрытые
+  // от него во время collect, seq которых уже <= его собственного lastSeq
+  // (см. JSDoc gateway.ts, обработчик hello).
+  revealSeq: bigint("reveal_seq", { mode: "number" }),
 });
 
 /**

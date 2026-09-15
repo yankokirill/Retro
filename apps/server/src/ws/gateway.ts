@@ -31,6 +31,7 @@ import {
   findOp,
   findUnvoteSeq,
   opsSince,
+  opsUpTo,
   replayFromSnapshot,
   welcomeData,
 } from "../ops/log.js";
@@ -128,16 +129,30 @@ export function registerBoardWebSocket(app: FastifyInstance, deps: WsGatewayDeps
         if (subscriber) deps.hub.unsubscribe(boardId, subscriber);
       });
 
+      // T-026 (H2): сообщения ОДНОГО соединения обрабатываются строго в
+      // порядке прихода — без этого `op`, отправленный клиентом сразу вторым
+      // сообщением, без ожидания `welcome` на `hello`, мог начать
+      // выполняться параллельно с ещё не завершившимся `handleMessage(hello)`
+      // (тот ждёт `getBoardForGuest`) и заставал `subscriber === null`,
+      // получая "first message must be hello" и разрыв соединения — хотя
+      // `hello` был отправлен первым и был валиден. Маленькая цепочка
+      // промисов на соединение, тот же приём, что `board-queue.ts` для
+      // доски. Временная заплатка: T-024 заменит её настоящей очередью
+      // (каждое сообщение и отписка — через `queue.run`, SIM-05), но
+      // поведение уже корректно.
+      let inbox: Promise<void> = Promise.resolve();
       socket.on("message", (raw: RawData) => {
-        void handleMessage(raw.toString()).catch((error: unknown) => {
-          request.log.error(error, "ws message handling failed");
-          // Ни одна причина из RejectReason не описывает «не реализовано/
-          // внутренняя ошибка» — это осознанно: точные причины отказа по
-          // V1–V7 появятся в T-010/T-011/T-012. `forbidden` здесь — общий
-          // предохранитель, не диагноз конкретного правила.
-          sendError(socket, "forbidden", error instanceof Error ? error.message : String(error));
-          socket.close();
-        });
+        inbox = inbox
+          .then(() => handleMessage(raw.toString()))
+          .catch((error: unknown) => {
+            request.log.error(error, "ws message handling failed");
+            // Ни одна причина из RejectReason не описывает «не реализовано/
+            // внутренняя ошибка» — это осознанно: точные причины отказа по
+            // V1–V7 появятся в T-010/T-011/T-012. `forbidden` здесь — общий
+            // предохранитель, не диагноз конкретного правила.
+            sendError(socket, "forbidden", error instanceof Error ? error.message : String(error));
+            socket.close();
+          });
       });
 
       async function handleMessage(raw: string): Promise<void> {
@@ -180,6 +195,36 @@ export function registerBoardWebSocket(app: FastifyInstance, deps: WsGatewayDeps
           const authorsMap = guest.revealed ? null : await authorsForBoard(deps.db, boardId);
           const project = (delta: WireDelta) =>
             authorsMap ? projectVisible(delta, (id) => authorsMap.get(id), message.guestId) : delta;
+
+          // T-026 (H1, ВС-2(б) docs/spec/simulator.md § 13): хвост welcome
+          // (выше) несёт только seq > lastSeq — если гость был отключён на
+          // момент reveal, строки, скрытые от него во время collect с
+          // seq <= его собственного lastSeq, туда не попадают и без этой
+          // досылки не попали бы никогда (sendRevealCatchup их тоже не
+          // застал — гостя не было среди подписчиков). Диапазоны не
+          // пересекаются: upper = min(lastSeq, revealSeq) <= lastSeq, а хвост
+          // либо начинается с lastSeq+1 (upper < тот случай), либо со
+          // снапшота с upToSeq > lastSeq >= upper (снапшот-случай) —
+          // подробный разбор обоих случаев в docs/adr (при необходимости).
+          let catchupOps: { readonly seq: number; readonly delta: WireDelta }[] = [];
+          if (guest.revealed && message.lastSeq !== null && guest.revealSeq !== null) {
+            const upper = Math.min(message.lastSeq, guest.revealSeq);
+            if (upper > 0) {
+              const catchupAuthorsMap = await authorsForBoard(deps.db, boardId);
+              const rows = await opsUpTo(deps.db, boardId, upper);
+              catchupOps = rows
+                .map((row) => ({
+                  seq: row.seq,
+                  delta: projectHidden(
+                    row.delta,
+                    (id) => catchupAuthorsMap.get(id),
+                    message.guestId,
+                  ),
+                }))
+                .filter((row) => !isEmptyDelta(row.delta));
+            }
+          }
+
           send(socket, {
             type: "welcome",
             role: guest.role,
@@ -188,9 +233,12 @@ export function registerBoardWebSocket(app: FastifyInstance, deps: WsGatewayDeps
             snapshot: welcome.snapshot
               ? { upToSeq: welcome.snapshot.upToSeq, state: project(welcome.snapshot.state) }
               : null,
-            ops: welcome.ops
-              .map((row) => ({ seq: row.seq, delta: project(row.delta) }))
-              .filter((row) => !isEmptyDelta(row.delta)),
+            ops: [
+              ...catchupOps,
+              ...welcome.ops
+                .map((row) => ({ seq: row.seq, delta: project(row.delta) }))
+                .filter((row) => !isEmptyDelta(row.delta)),
+            ],
           });
           return;
         }

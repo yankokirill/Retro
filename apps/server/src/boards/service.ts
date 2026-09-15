@@ -4,10 +4,10 @@
 // передаёт своё подключение).
 
 import type { Phase, Role } from "@retro/protocol";
-import { and, eq, isNull, or } from "drizzle-orm";
+import { and, eq, isNull, max, or } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "../db/schema.js";
-import { boards, members } from "../db/schema.js";
+import { boards, members, ops } from "../db/schema.js";
 import { authorsDisplayNames } from "../ops/authors.js";
 
 export type Db = NodePgDatabase<typeof schema>;
@@ -127,6 +127,8 @@ export interface BoardForGuest {
   readonly title: string;
   readonly phase: string;
   readonly revealed: boolean;
+  /** T-026, ВС-2(б): seq доски на момент reveal; `null`, пока `collect`. */
+  readonly revealSeq: number | null;
   readonly voteLimit: number;
   readonly timer: null;
   readonly authors: Record<string, string>;
@@ -173,6 +175,7 @@ export async function getBoardForGuest(
     title: board.title,
     phase: board.phase,
     revealed,
+    revealSeq: board.revealSeq,
     voteLimit: board.settings.voteLimit,
     timer: null,
     authors: revealed ? await authorsDisplayNames(db, board.id) : {},
@@ -228,7 +231,28 @@ export async function setPhase(db: Db, params: SetPhaseParams): Promise<SetPhase
   if (role !== "owner" && role !== "facilitator") return "forbidden";
   if (board.phase !== "collect" && params.phase === "collect") return "irreversible_phase";
 
-  await db.update(boards).set({ phase: params.phase }).where(eq(boards.id, params.boardId));
+  const isReveal = board.phase === "collect" && params.phase !== "collect";
+  if (isReveal) {
+    // T-026, ВС-2(б) (H1, docs/spec/simulator.md § 13): запоминаем seq
+    // доски на момент первого ухода из collect — по нему `welcome`
+    // (`ws/gateway.ts`) досылает переподключившемуся гостю то, что было
+    // скрыто от него во время collect. Гонки между SELECT и UPDATE нет:
+    // `setPhase` вызывается внутри `queue.run(boardId, …)` (`ws/gateway.ts`),
+    // той же очереди, что сериализует и `op` — на момент этого запроса
+    // никто другой параллельно не пишет в `ops` этой доски.
+    await db.transaction(async (tx) => {
+      const [maxRow] = await tx
+        .select({ maxSeq: max(ops.seq) })
+        .from(ops)
+        .where(eq(ops.boardId, params.boardId));
+      await tx
+        .update(boards)
+        .set({ phase: params.phase, revealSeq: maxRow?.maxSeq ?? 0 })
+        .where(eq(boards.id, params.boardId));
+    });
+  } else {
+    await db.update(boards).set({ phase: params.phase }).where(eq(boards.id, params.boardId));
+  }
   return "ok";
 }
 
