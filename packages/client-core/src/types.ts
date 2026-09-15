@@ -96,7 +96,13 @@ export interface ClientSnapshot {
   readonly role: Role | null;
   /** Из последнего `welcome`/`meta`; `null` до первого подключения. */
   readonly meta: BoardMeta | null;
-  /** Из `welcome`; `null` до первого подключения — блокирует `vote`/`unvote` (`not_welcomed_yet`). */
+  /**
+   * Из `welcome`; `null` до самого первого `welcome`, полученного этим
+   * экземпляром — блокирует `vote`/`unvote` (`not_welcomed_yet`). Дальше НЕ
+   * сбрасывается ни `disconnected()`, ни `receive(error)` — иначе офлайн
+   * `vote` (REQ-023 кр. 1, ровно этот пример есть в тексте требования) был
+   * бы невозможен после первого же разрыва связи.
+   */
   readonly voterToken: string | null;
   /** Причины отказа своих операций, в порядке получения `reject` (REQ-024 кр. 2). Не усекается. */
   readonly rejections: readonly Rejection[];
@@ -120,10 +126,35 @@ export interface SyncClient {
 
   /**
    * Строка от сервера (одно сообщение `ServerMessage`, protocol.md § 5) →
-   * строки, которые нужно отправить в ответ. Порядок обработки по типам —
-   * см. `docs/design/T-005-simulator.md` § 4, таблица «Сообщение / Действие».
-   * Сообщение, не прошедшее `serverMessageSchema` (`@retro/protocol`), —
-   * ошибка протокола, `receive` бросает исключение, а не игнорирует его.
+   * строки, которые нужно отправить в ответ. Сообщение, не прошедшее
+   * `serverMessageSchema` (`@retro/protocol`), — ошибка протокола, `receive`
+   * бросает исключение, а не игнорирует его.
+   *
+   * По типу сообщения (единственный, что возвращает непустой массив, — `welcome`):
+   * - `welcome` — `status := "welcomed"`; `role`/`meta`/`voterToken` — из
+   *   сообщения; `X_c := X_c ⊔ fromWire(snapshot?.state) ⊔ fromWire(ops[i].delta)`
+   *   для всех `i`; `lastSeq := max(lastSeq, snapshot?.upToSeq, ops[i].seq)`.
+   *   Возвращает по одному `op` на каждый элемент `P`, в порядке добавления
+   *   (REQ-023 кр. 2) — `P` при этом не меняется, элементы остаются ждать
+   *   свои `ack`/`reject`.
+   * - `op` — `X_c := X_c ⊔ fromWire(delta)`, `lastSeq := max(lastSeq, seq)`.
+   *   Безусловно, независимо от `status` (даже до `welcome` этого
+   *   соединения) — никогда не отбрасывается. Возвращает `[]`.
+   * - `ack {dot, seq}` — первый элемент `P` (в порядке добавления) с этим
+   *   `dot`: переносится в `X_c` (`merge`), удаляется из `P`. Нет такого
+   *   элемента (повтор, либо dot никогда не отправлялся этим клиентом) —
+   *   игнор, `X_c`/`P` не меняются. Возвращает `[]`.
+   * - `reject {dot, reason}` — первый элемент `P` с этим `dot`: удаляется
+   *   из `P` (в `X_c` не переносится), в конец `rejections` добавляется
+   *   `{dot, reason}`. Нет такого элемента — игнор, `rejections` не растёт.
+   *   Возвращает `[]`.
+   * - `meta {meta}` — снимок `meta` заменяется целиком присланным. Возвращает `[]`.
+   * - `commandResult` — наблюдаемого эффекта нет (нет поля в `ClientSnapshot`
+   *   под результаты команд — T-028 не вводит реестр команда→результат, это
+   *   дело UI/T-015). Не бросает. Возвращает `[]`.
+   * - `error {reason}` — `status := "offline"` (сервер сам закроет
+   *   соединение; `disconnected()` от адаптера, если последует, — идемпотентен).
+   *   `X_c`, `P`, `rejections`, `voterToken` не меняются. Возвращает `[]`.
    */
   receive(raw: string): string[];
 
