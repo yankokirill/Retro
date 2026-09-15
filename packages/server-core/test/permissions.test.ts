@@ -51,7 +51,7 @@ import {
   checkPermission,
   classifyAction,
   type StickerAction,
-} from "../src/ops/permissions.js";
+} from "../src/rules/permissions.js";
 
 const newActor = () => crypto.randomUUID();
 

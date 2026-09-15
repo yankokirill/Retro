@@ -36,8 +36,8 @@ import {
   vote,
 } from "@retro/crdt";
 import { describe, expect, it } from "vitest";
-import type { ValidateOpParams } from "../src/ops/validate.js";
-import { validateOp } from "../src/ops/validate.js";
+import type { ValidateOpParams } from "../src/rules/validate.js";
+import { validateOp } from "../src/rules/validate.js";
 
 // `ActorClock` не экспортируется отдельно — берём его форму структурно из
 // уже экспортированного `ValidateOpParams["actorClock"]` (контракт задачи

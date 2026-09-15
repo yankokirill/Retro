@@ -4,6 +4,7 @@
 // передаёт своё подключение).
 
 import type { Phase, Role } from "@retro/protocol";
+import { checkResetVotes, checkSetPhase, resolveRole } from "@retro/server-core";
 import { and, eq, isNull, max, or } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "../db/schema.js";
@@ -156,17 +157,16 @@ export async function getBoardForGuest(
     .where(and(eq(boards.id, params.boardId), isNull(boards.deletedAt)));
   if (!board) return null;
 
-  let role: Role;
-  if (board.ownerId === params.guestId) {
-    role = "owner";
-  } else {
+  let memberRole: Role | null = null;
+  if (board.ownerId !== params.guestId) {
     const [member] = await db
       .select({ role: members.role })
       .from(members)
       .where(and(eq(members.boardId, board.id), eq(members.userId, params.guestId)));
-    if (!member) return null;
-    role = member.role as Role;
+    memberRole = (member?.role as Role | undefined) ?? null;
   }
+  const role = resolveRole({ ownerId: board.ownerId, guestId: params.guestId, memberRole });
+  if (!role) return null;
 
   const revealed = board.phase !== "collect";
 
@@ -217,19 +217,18 @@ export async function setPhase(db: Db, params: SetPhaseParams): Promise<SetPhase
     .where(and(eq(boards.id, params.boardId), isNull(boards.deletedAt)));
   if (!board) return "not_found";
 
-  let role: Role;
-  if (board.ownerId === params.guestId) {
-    role = "owner";
-  } else {
+  let memberRole: Role | null = null;
+  if (board.ownerId !== params.guestId) {
     const [member] = await db
       .select({ role: members.role })
       .from(members)
       .where(and(eq(members.boardId, params.boardId), eq(members.userId, params.guestId)));
     if (!member) return "not_found";
-    role = member.role as Role;
+    memberRole = member.role as Role;
   }
-  if (role !== "owner" && role !== "facilitator") return "forbidden";
-  if (board.phase !== "collect" && params.phase === "collect") return "irreversible_phase";
+  const role = resolveRole({ ownerId: board.ownerId, guestId: params.guestId, memberRole });
+  const check = checkSetPhase(role, board.phase as Phase, params.phase);
+  if (check !== "ok") return check;
 
   const isReveal = board.phase === "collect" && params.phase !== "collect";
   if (isReveal) {
@@ -338,18 +337,15 @@ export async function resetVotes(db: Db, params: ResetVotesParams): Promise<Rese
     .where(and(eq(boards.id, params.boardId), isNull(boards.deletedAt)));
   if (!board) return "not_found";
 
-  let role: Role;
-  if (board.ownerId === params.guestId) {
-    role = "owner";
-  } else {
+  let memberRole: Role | null = null;
+  if (board.ownerId !== params.guestId) {
     const [member] = await db
       .select({ role: members.role })
       .from(members)
       .where(and(eq(members.boardId, params.boardId), eq(members.userId, params.guestId)));
     if (!member) return "not_found";
-    role = member.role as Role;
+    memberRole = member.role as Role;
   }
-  if (role !== "owner" && role !== "facilitator") return "forbidden";
-
-  return "ok";
+  const role = resolveRole({ ownerId: board.ownerId, guestId: params.guestId, memberRole });
+  return checkResetVotes(role);
 }

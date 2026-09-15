@@ -29,7 +29,7 @@ import type { EntityId, State } from "@retro/crdt";
 import { activeVotes, empty, merge, newClock, unvote, vote } from "@retro/crdt";
 import type { Phase, Role } from "@retro/protocol";
 import { describe, expect, it } from "vitest";
-import { checkVoteLimit, checkVoteOwnership, checkVotePermission } from "../src/ops/votes.js";
+import { checkVoteLimit, checkVoteOwnership, checkVotePermission } from "../src/rules/votes.js";
 
 const newActor = () => crypto.randomUUID();
 const newToken = () => `voter-${crypto.randomUUID()}`;
