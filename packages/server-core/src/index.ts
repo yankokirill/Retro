@@ -2,6 +2,14 @@
 // Собирается по шагам: сначала чистые правила и порт хранения (этот коммит),
 // затем `createBoardServer`/`handlers/*` (см. docs/tasks.md T-024).
 
+export type {
+  BoardServer,
+  ConnectionId,
+  Outgoing,
+  ReceiveResult,
+  ServerCorePorts,
+} from "./board-server.js";
+export { createBoardServer } from "./board-server.js";
 export { type BoardQueue, createBoardQueue } from "./queue.js";
 export type { ResetVotesCheckResult, SetPhaseCheckResult } from "./rules/board.js";
 export { checkResetVotes, checkSetPhase, resolveRole } from "./rules/board.js";
