@@ -2,9 +2,9 @@
 // `docs/spec/consistency-model.md`). Функции берут `db` параметром, как
 // `boards/service.ts` — тестируемо без переменных окружения.
 
-import type { Dot, State, WireDelta } from "@retro/crdt";
+import type { Dot, EntityId, State, WireDelta } from "@retro/crdt";
 import { compact as compactState, empty, fromWire, merge, toWire } from "@retro/crdt";
-import { and, asc, desc, eq, gt, max } from "drizzle-orm";
+import { and, asc, desc, eq, gt, max, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "../db/schema.js";
 import { ops, snapshots } from "../db/schema.js";
@@ -39,8 +39,9 @@ export interface AppendOpResult {
  * см. JSDoc `AppendOpParams.dot`) дедупликации на уровне строк журнала нет
  * — каждый вызов добавляет строку; итоговое материализованное состояние
  * при этом не меняется от повтора (merge идемпотентен, I2.5), только объём
- * журнала может немного вырасти — полная защита от дублей unvote на уровне
- * протокола остаётся за V1 в T-010.
+ * журнала может немного вырасти — защита от дублей `unvote` на уровне
+ * протокола теперь за `findUnvoteSeq` ниже, вызывается раньше `appendOp`
+ * (ADR-0008; до T-012 ошибочно считалось, что это делает V1).
  */
 export async function appendOp(db: Db, params: AppendOpParams): Promise<AppendOpResult> {
   const [inserted] = await db
@@ -83,8 +84,8 @@ export interface FoundOp {
  * `ack` с её `seq`, без повторной валидации и без вызова `appendOp`. `null`,
  * если такой строки нет (операция либо свежая, либо устаревшая — решает V1).
  * Не применяется к `unvote` (`AppendOpParams.dot` для него `null` — у него
- * нет собственной пары `(actor, counter)`, см. JSDoc там); эту проверку
- * вызывающий код (`ws/gateway.ts`) для `unvote` не делает вовсе.
+ * нет собственной пары `(actor, counter)`, см. JSDoc там) — для него идемпотентность
+ * ищет `findUnvoteSeq` ниже (ADR-0008), не эта функция.
  */
 export async function findOp(
   db: Db,
@@ -97,6 +98,38 @@ export async function findOp(
     .from(ops)
     .where(and(eq(ops.boardId, boardId), eq(ops.actor, actor), eq(ops.counter, counter)));
   return row ?? null;
+}
+
+/**
+ * ADR-0008 (REQ-023 кр.3): идемпотентность `unvote` — не по `(actor, counter)`
+ * (`findOp` выше, `unvote` не имеет собственной пары), а по тому, есть ли уже
+ * в журнале запись, отозвавшая именно этот голос — `(voteDot, target)`.
+ * Не важно, кто её записал: тот же клиент повторной отправкой (переподключение,
+ * REQ-023 кр.3), или сервер через `resetVotes` — итоговое состояние то же, что
+ * хотел клиент, поэтому это `ack` с `seq` уже существующей записи, не отказ.
+ * `null` — такой записи ещё нет, отзыв нужно провести обычным путём (V7).
+ *
+ * Ищет по jsonb-containment (`@>`) внутри `ops.delta->'unvotes'` — тот же
+ * массив, что несёт `WireDelta.unvotes` (ровно один элемент на unvote-операцию,
+ * `clientDeltaSchema`); без индекса, полный скан по доске — журнал одной
+ * доски некрупный (REQ-023: сотни операций, не миллионы).
+ */
+export async function findUnvoteSeq(
+  db: Db,
+  boardId: string,
+  voteDot: Dot,
+  target: EntityId,
+): Promise<number | null> {
+  const needle = JSON.stringify([
+    { dot: { actor: voteDot.actor, counter: voteDot.counter }, target },
+  ]);
+  const [row] = await db
+    .select({ seq: ops.seq })
+    .from(ops)
+    .where(and(eq(ops.boardId, boardId), sql`${ops.delta}->'unvotes' @> ${needle}::jsonb`))
+    .orderBy(asc(ops.seq))
+    .limit(1);
+  return row?.seq ?? null;
 }
 
 export interface ActorClock {
