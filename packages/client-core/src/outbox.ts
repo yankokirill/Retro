@@ -7,6 +7,7 @@
 // это чистый write-through лог для того, кто решит его использовать.
 
 import type { Dot, WireDelta } from "@retro/crdt";
+import type { Intent } from "./types.js";
 
 /**
  * Один элемент очереди P. `dot` — то же, что вернул бы `operationDot(delta)`
@@ -17,6 +18,12 @@ import type { Dot, WireDelta } from "@retro/crdt";
  * сопоставляет ответ сервера с элементом P.
  */
 export interface PendingEntry {
+  /**
+   * Намерение, из которого построена `delta` (ADR-0010): при отказе более
+   * ранней дельты, от которой эта зависит только по перекрытию, дельта
+   * пересобирается из намерения над новым `X_c ⊔ ⨆P`.
+   */
+  readonly intent: Intent;
   readonly delta: WireDelta;
   readonly dot: Dot;
   readonly kind: "op" | "unvote";

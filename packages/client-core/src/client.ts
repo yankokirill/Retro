@@ -2,8 +2,11 @@
 // метода описано в JSDoc `types.ts`; этот файл — только код, следующий
 // этому контракту.
 
+import type { Clock, Dot, State } from "@retro/crdt";
 import {
   assign,
+  unvote as crdtUnvote,
+  vote as crdtVote,
   createAction,
   createGroup,
   createSticker,
@@ -21,12 +24,9 @@ import {
   setDone,
   setGroup,
   toWire,
-  unvote as crdtUnvote,
-  vote as crdtVote,
 } from "@retro/crdt";
-import type { Clock, Dot, State } from "@retro/crdt";
-import { PROTOCOL_VERSION, clientDeltaSchema, serverMessageSchema } from "@retro/protocol";
 import type { BoardMeta, Command, RejectReason, Role, ServerMessage } from "@retro/protocol";
+import { clientDeltaSchema, PROTOCOL_VERSION, serverMessageSchema } from "@retro/protocol";
 import type { PendingEntry } from "./outbox.js";
 import type {
   ActResult,
@@ -52,7 +52,7 @@ function buildEntry(
   clock: Clock,
   intent: Intent,
   voterToken: string | null,
-): { entry: PendingEntry; clock: Clock } {
+): { entry: Omit<PendingEntry, "intent">; clock: Clock } {
   switch (intent.type) {
     case "createSticker": {
       const r = createSticker(state, clock, {
@@ -192,7 +192,7 @@ export function createSyncClient(config: SyncClientConfig, ports: ClientCorePort
     const validation = clientDeltaSchema.safeParse(built.entry.delta);
     if (!validation.success) return { ok: false, reason: "invalid_intent" };
 
-    pending = [...pending, built.entry];
+    pending = [...pending, { ...built.entry, intent }];
     clock = built.clock;
     saveOutbox();
 
