@@ -5,6 +5,12 @@
 // `ws/gateway.ts` — сюда попадает только уже валидная по форме дельта, эту
 // проверку заново не делаем. V6 (права/фазы) и V7 (голоса) — T-011, T-012,
 // тоже не здесь.
+//
+// ADR-0008: V1 (весь целиком, включая привязку к actorId соединения) НЕ
+// применяется к `unvote` — его `dot` в проводном формате это dot ОТЗЫВАЕМОГО
+// голоса (чужая, более ранняя операция `vote`), не собственный dot операции
+// отзыва. Принадлежность голоса пользователю — V7 (`ops/votes.ts`
+// `checkVoteOwnership`, сравнивает по `voterToken`, не по `actorId`).
 
 import type { EntityId, Field, Kind, State, WireDelta } from "@retro/crdt";
 import { entityKind, entryAt, supersedeRecorded } from "@retro/crdt";
@@ -35,8 +41,8 @@ export interface ValidateOpParams {
   /**
    * actorId, заявленный этим WS-соединением в `hello` (`ws/gateway.ts`).
    * V1 «owner(a) = u»: dot операции обязан принадлежать этому актору — иначе
-   * `stale_dot` (T-009 оставлял эту проверку открытым вопросом для T-010,
-   * см. `docs/spec/protocol.md` § 5).
+   * `stale_dot`. Применяется к `create`/`write`/`vote`; НЕ применяется к
+   * `unvote` (ADR-0008, см. шапку файла) — его `dot` не собственный.
    */
   readonly connectionActorId: string;
   /** Один клиентский `op` — уже прошёл `clientDeltaSchema` (ровно одна операция). */
@@ -45,12 +51,11 @@ export interface ValidateOpParams {
    * `null` — только для `unvote`. У `unvote` нет собственного свежего dot
    * (его `dot` в проводном формате — dot **отзываемого голоса**, T-002,
    * `unvote` не тикает часы) и нет метки (2P-set, § 3.1) — поэтому V1
-   * (свежесть по счётчику) и V5 (метка) к нему не применяются вовсе. Это и
-   * есть решение открытого вопроса, оставленного T-008/T-010 (см.
-   * `docs/tasks.md`): корректность unvote (голос существует, принадлежит u,
-   * ещё не отозван) — V7, T-012, не эта функция. Для всех остальных
-   * операций (create/write/vote — у vote тоже есть свежий dot, хоть и без
-   * метки) — обязателен.
+   * целиком (и свежесть по счётчику, и привязка к актору соединения,
+   * ADR-0008) и V5 (метка) к нему не применяются вовсе. Корректность unvote
+   * (голос существует, принадлежит u, ещё не отозван) — V7, T-012, не эта
+   * функция. Для всех остальных операций (create/write/vote — у vote тоже
+   * есть свежий dot, хоть и без метки) — обязателен.
    */
   readonly actorClock: ActorClock | null;
 }
@@ -76,17 +81,19 @@ export function validateOp(params: ValidateOpParams): ValidateOpResult {
   const isVote = delta.votes.length > 0;
   const isCreate = delta.created.length > 0;
 
-  // V1 — owner(a) = u. Применяется всегда, включая unvote: его dot — dot
-  // отзываемого голоса, но и он обязан принадлежать этому соединению.
-  if (dot.actor !== connectionActorId) {
-    return reject(
-      "stale_dot",
-      `dot actor ${dot.actor} does not match connection actor ${connectionActorId}`,
-    );
-  }
-
-  // V1 — свежесть по счётчику. Не применяется к unvote (нет своего dot).
+  // V1 — owner(a) = u, свежесть по счётчику. Не применяется к unvote вовсе
+  // (ADR-0008): его dot — dot ОТЗЫВАЕМОГО голоса (чужая, более ранняя
+  // операция vote), не собственный dot операции отзыва — актор в общем
+  // случае не совпадает с актором этого соединения (другая вкладка того же
+  // guestId, или та же вкладка после перезагрузки). Принадлежность голоса
+  // этому пользователю — V7 (checkVoteOwnership), не V1.
   if (!isUnvote) {
+    if (dot.actor !== connectionActorId) {
+      return reject(
+        "stale_dot",
+        `dot actor ${dot.actor} does not match connection actor ${connectionActorId}`,
+      );
+    }
     if (!actorClock) throw new Error("validateOp: actorClock required for non-unvote operations");
     if (dot.counter <= actorClock.lastCounter) {
       return reject(
