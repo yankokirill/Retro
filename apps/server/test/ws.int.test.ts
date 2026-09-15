@@ -198,6 +198,21 @@ describe("REQ-022: сходимость независимо от порядка
     expect(welcomeOwner.type).toBe("welcome");
     expect(welcomeParticipant.type).toBe("welcome");
 
+    // T-013, REQ-006: в default-фазе collect чужой стикер скрыт — это не то,
+    // что здесь проверяется (см. отдельные тесты REQ-006 ниже). Уходим в
+    // group, чтобы эта операция была видна обоим и проверялся только сам
+    // факт сходимости (REQ-022), не видимость.
+    wsOwner.send(
+      JSON.stringify({
+        type: "command",
+        id: "cmd-group",
+        command: { type: "setPhase", phase: "group" },
+      }),
+    );
+    // Порядок commandResult/meta для автора командой не фиксирован (см. REQ-004 тест выше).
+    await Promise.all([readerOwner.next(), readerOwner.next()]);
+    await nextOfType(readerParticipant, ["meta"]);
+
     // Владелец создаёт стикер — ровно одна CRDT-операция (§ 3 protocol.md).
     const created = createSticker(empty(), newClock(actorOwner), {
       column: "start",
@@ -1699,6 +1714,310 @@ describe("REQ-007/REQ-009: appendOp+recordAuthor атомарны — сбой �
       .from(schema.authors)
       .where(and(eq(schema.authors.boardId, boardId), eq(schema.authors.entityId, stickerId)));
     expect(authorRow[0]?.guestId).toBe(participantId);
+
+    ws.close();
+    ws2.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-013 — «Проекция видимости и reveal»: приёмочные тесты по реальному WS,
+// написанные ДО реализации и не глядя в неё (docs/spec/protocol.md § 2
+// «Авторство стикеров», § 5 `BoardMeta`, § 6 «Reveal»;
+// docs/spec/requirements.md REQ-006, REQ-004 кр.1, REQ-020 кр.2;
+// docs/spec/consistency-model.md § 5 проекция `proj_u`).
+//
+// Ключевое отличие от «просто не показываем на экране»: пока доска в
+// `collect`, чужой стикер получателю вообще НЕ ДОСТАВЛЯЕТСЯ — ни в
+// `welcome` (ни в снапшоте, ни в хвосте журнала `ops`), ни как `op`-
+// рассылка. Само событие «что-то произошло» не должно утекать до `reveal`
+// (protocol.md § 2: «до reveal сервер не отправляет чужие сущности вовсе»).
+// После `reveal` (первый `setPhase` из `collect`, REQ-004 кр.1) сервер
+// досылает ранее скрытое как `op`, `meta.revealed` становится `true`, а
+// `meta.authors` — заполняется.
+//
+// `apps/server/src/**` не читался.
+// ---------------------------------------------------------------------------
+
+/**
+ * Доказывает ОТСУТСТВИЕ следующего сообщения у `reader` в течение 300ms.
+ * Нужен именно гонкой с таймаутом (а не «следующее сообщение — другого
+ * типа»): порядок доставки между независимыми WS-соединениями протоколом
+ * не гарантирован (см. `nextOfType` выше в этом файле), поэтому единственный
+ * надёжный способ показать «ничего не пришло вообще» — подождать и не
+ * получить ничего.
+ */
+async function expectNoMessage(reader: ReturnType<typeof messageReader>): Promise<void> {
+  const result = await Promise.race([
+    reader.next().then(() => "message" as const),
+    new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 300)),
+  ]);
+  expect(result).toBe("timeout");
+}
+
+describe("REQ-006 (кр. 1): чужой стикер в фазе collect не доходит до получателя вовсе", () => {
+  it("REQ-006 кр.1а: стикер создан ДО подключения получателя — отсутствует и в welcome.snapshot, и в welcome.ops", async () => {
+    const { boardId, ownerId, participantLink } = await newBoardWithOwner();
+
+    const wsOwner = await connect(boardId);
+    const readerOwner = messageReader(wsOwner);
+    const ownerActorId = newActorId();
+    sendHello(wsOwner, { guestId: ownerId, displayName: "Owner", actorId: ownerActorId });
+    expect((await readerOwner.next()).type).toBe("welcome");
+
+    const created = createSticker(empty(), newClock(ownerActorId), {
+      column: "start",
+      frac: "1",
+      text: "owner's secret, before newcomer connects",
+      color: "yellow",
+    });
+    wsOwner.send(JSON.stringify({ type: "op", delta: toWire(created.delta) }));
+    expect((await readerOwner.next()).type).toBe("ack");
+    const stickerId = dotKey(created.dot) as EntityId;
+
+    // Участник присоединяется и подключается ПОСЛЕ того, как стикер уже создан.
+    const participantId = newGuestId();
+    const joined = await joinByLink(db, {
+      linkToken: participantLink,
+      guestId: participantId,
+      displayName: "Newcomer",
+    });
+    expect(joined?.role).toBe("participant");
+
+    const ws = await connect(boardId);
+    const reader = messageReader(ws);
+    sendHello(ws, { guestId: participantId, displayName: "Newcomer", actorId: newActorId() });
+    const welcome = await reader.next();
+    expect(welcome.type).toBe("welcome");
+    if (welcome.type !== "welcome") throw new Error("expected welcome");
+
+    const seenInSnapshot = welcome.snapshot?.state.created.some((c) => c.id === stickerId) ?? false;
+    const seenInOps = welcome.ops.some((op) => op.delta.created.some((c) => c.id === stickerId));
+    expect(seenInSnapshot).toBe(false);
+    expect(seenInOps).toBe(false);
+
+    wsOwner.close();
+    ws.close();
+  });
+
+  it("REQ-006 кр.1б: стикер создан ПОСЛЕ подключения получателя — не приходит как op-рассылка вовсе (не пустая дельта, а ничего)", async () => {
+    const { boardId, ownerId, participantLink } = await newBoardWithOwner();
+
+    const participantId = newGuestId();
+    const joined = await joinByLink(db, {
+      linkToken: participantLink,
+      guestId: participantId,
+      displayName: "Bystander",
+    });
+    expect(joined?.role).toBe("participant");
+
+    const wsOwner = await connect(boardId);
+    const ws = await connect(boardId);
+    const readerOwner = messageReader(wsOwner);
+    const reader = messageReader(ws);
+
+    const ownerActorId = newActorId();
+    sendHello(wsOwner, { guestId: ownerId, displayName: "Owner", actorId: ownerActorId });
+    sendHello(ws, { guestId: participantId, displayName: "Bystander", actorId: newActorId() });
+    expect((await readerOwner.next()).type).toBe("welcome");
+    expect((await reader.next()).type).toBe("welcome");
+
+    const created = createSticker(empty(), newClock(ownerActorId), {
+      column: "start",
+      frac: "1",
+      text: "owner's live secret, after bystander already connected",
+      color: "green",
+    });
+    wsOwner.send(JSON.stringify({ type: "op", delta: toWire(created.delta) }));
+    expect((await readerOwner.next()).type).toBe("ack");
+
+    // Получатель уже подписан на доску — если бы видимость была лишь
+    // фильтром на экране, он получил бы `op` (пусть и с пустой для него
+    // проекцией). Здесь он не получает ВООБЩЕ НИЧЕГО для этой операции.
+    await expectNoMessage(reader);
+
+    wsOwner.close();
+    ws.close();
+  });
+});
+
+describe("REQ-006 (кр. 2): временное скрытие действует для всех ролей без исключения, включая owner", () => {
+  it("REQ-006 кр.2: owner не видит чужой стикер, пока доска в collect — ни живьём, ни в welcome после переподключения", async () => {
+    const { boardId, ownerId, participantLink } = await newBoardWithOwner();
+
+    const participantId = newGuestId();
+    const joined = await joinByLink(db, {
+      linkToken: participantLink,
+      guestId: participantId,
+      displayName: "Author",
+    });
+    expect(joined?.role).toBe("participant");
+
+    const wsParticipant = await connect(boardId);
+    const readerParticipant = messageReader(wsParticipant);
+    const participantActorId = newActorId();
+    sendHello(wsParticipant, {
+      guestId: participantId,
+      displayName: "Author",
+      actorId: participantActorId,
+    });
+    expect((await readerParticipant.next()).type).toBe("welcome");
+
+    // Owner уже подключён ДО создания чужого стикера — проверяем живую рассылку.
+    const wsOwner = await connect(boardId);
+    const readerOwner = messageReader(wsOwner);
+    sendHello(wsOwner, { guestId: ownerId, displayName: "Owner", actorId: newActorId() });
+    expect((await readerOwner.next()).type).toBe("welcome");
+
+    const created = createSticker(empty(), newClock(participantActorId), {
+      column: "start",
+      frac: "1",
+      text: "participant's secret, owner must not see it either",
+      color: "pink",
+    });
+    wsParticipant.send(JSON.stringify({ type: "op", delta: toWire(created.delta) }));
+    expect((await readerParticipant.next()).type).toBe("ack");
+    const stickerId = dotKey(created.dot) as EntityId;
+
+    // Owner (роль с самыми широкими правами в системе) не получает ничего вживую...
+    await expectNoMessage(readerOwner);
+
+    // ...и переподключение тоже ничего не показывает: временное скрытие —
+    // свойство фазы collect, а не отсутствие привилегии у роли.
+    const wsOwner2 = await connect(boardId);
+    const readerOwner2 = messageReader(wsOwner2);
+    sendHello(wsOwner2, { guestId: ownerId, displayName: "Owner", actorId: newActorId() });
+    const welcomeOwner2 = await readerOwner2.next();
+    expect(welcomeOwner2.type).toBe("welcome");
+    if (welcomeOwner2.type !== "welcome") throw new Error("expected welcome");
+
+    const seenInSnapshot =
+      welcomeOwner2.snapshot?.state.created.some((c) => c.id === stickerId) ?? false;
+    const seenInOps = welcomeOwner2.ops.some((op) =>
+      op.delta.created.some((c) => c.id === stickerId),
+    );
+    expect(seenInSnapshot).toBe(false);
+    expect(seenInOps).toBe(false);
+
+    wsParticipant.close();
+    wsOwner.close();
+    wsOwner2.close();
+  });
+});
+
+describe("REQ-004 (кр. 1) + REQ-006 (кр. 3): reveal раскрывает авторов и досылает ранее скрытые стикеры", () => {
+  it("REQ-004 кр.1/REQ-006 кр.3: первый выход из collect — meta.revealed=true, meta.authors содержит автора скрытого стикера, стикер досылается op-рассылкой тому, кому был скрыт", async () => {
+    const { boardId, ownerId, participantLink } = await newBoardWithOwner();
+
+    const participantId = newGuestId();
+    const joined = await joinByLink(db, {
+      linkToken: participantLink,
+      guestId: participantId,
+      displayName: "Alice",
+    });
+    expect(joined?.role).toBe("participant");
+
+    const wsOwner = await connect(boardId);
+    const wsParticipant = await connect(boardId);
+    const readerOwner = messageReader(wsOwner);
+    const readerParticipant = messageReader(wsParticipant);
+
+    const ownerActorId = newActorId();
+    sendHello(wsOwner, { guestId: ownerId, displayName: "Owner", actorId: ownerActorId });
+    sendHello(wsParticipant, {
+      guestId: participantId,
+      displayName: "Alice",
+      actorId: newActorId(),
+    });
+    expect((await readerOwner.next()).type).toBe("welcome");
+    expect((await readerParticipant.next()).type).toBe("welcome");
+
+    // Owner создаёт стикер в collect — Alice его пока не видит вовсе (REQ-006 кр.1).
+    const created = createSticker(empty(), newClock(ownerActorId), {
+      column: "start",
+      frac: "1",
+      text: "hidden until reveal",
+      color: "yellow",
+    });
+    wsOwner.send(JSON.stringify({ type: "op", delta: toWire(created.delta) }));
+    expect((await readerOwner.next()).type).toBe("ack");
+    const stickerId = dotKey(created.dot) as EntityId;
+
+    // Отсутствие доставки до reveal отдельно доказано выше (REQ-006 кр.1).
+    // Здесь `readerParticipant` намеренно не трогаем до reveal: `next()`
+    // messageReader нельзя отменить — начатое здесь ожидание "ничего не
+    // пришло" забрало бы себе первое же сообщение после reveal и не отдало
+    // бы его последующему чтению ниже.
+
+    // Первый уход из collect — это и есть reveal (REQ-004 кр.1, protocol.md § 6).
+    wsOwner.send(
+      JSON.stringify({
+        type: "command",
+        id: "cmd-reveal",
+        command: { type: "setPhase", phase: "group" },
+      }),
+    );
+
+    // Порядок commandResult/meta для инициатора не гарантирован (как в
+    // существующем тесте REQ-004 кр.1/кр.3 выше в этом файле).
+    const ownerFirst = await readerOwner.next();
+    const ownerSecond = await readerOwner.next();
+    const ownerCommandResult = [ownerFirst, ownerSecond].find((m) => m.type === "commandResult");
+    expect(ownerCommandResult?.type).toBe("commandResult");
+    if (ownerCommandResult?.type !== "commandResult") throw new Error("expected commandResult");
+    expect(ownerCommandResult.ok).toBe(true);
+
+    // Alice получает `meta` с revealed=true и авторами, и (в любом порядке
+    // относительно meta, возможно несколькими op) — досылку ранее скрытого
+    // стикера owner'а.
+    let meta: Extract<ServerMessage, { type: "meta" }> | undefined;
+    let sawCreatedSticker = false;
+    for (let i = 0; i < 5 && (!meta || !sawCreatedSticker); i++) {
+      const msg = await readerParticipant.next();
+      if (msg.type === "meta") meta = msg;
+      if (msg.type === "op" && msg.delta.created.some((c) => c.id === stickerId)) {
+        sawCreatedSticker = true;
+      }
+    }
+
+    expect(meta?.type).toBe("meta");
+    if (meta?.type !== "meta") throw new Error("expected meta broadcast with reveal");
+    expect(meta.meta.revealed).toBe(true);
+    expect(meta.meta.authors[stickerId]).toBe("Owner");
+    expect(sawCreatedSticker).toBe(true);
+
+    wsOwner.close();
+    wsParticipant.close();
+  });
+});
+
+describe("REQ-020 (кр. 2): доска не считается раскрытой, пока в collect", () => {
+  it("REQ-020 кр.2: welcome.meta.revealed=false и welcome.meta.authors={} в фазе collect, даже если стикеры уже созданы", async () => {
+    const { boardId, ownerId } = await newBoardWithOwner();
+
+    const ws = await connect(boardId);
+    const reader = messageReader(ws);
+    const actorId = newActorId();
+    sendHello(ws, { guestId: ownerId, displayName: "Owner", actorId });
+    expect((await reader.next()).type).toBe("welcome");
+
+    const created = createSticker(empty(), newClock(actorId), {
+      column: "start",
+      frac: "1",
+      text: "still in collect, board not revealed yet",
+      color: "yellow",
+    });
+    ws.send(JSON.stringify({ type: "op", delta: toWire(created.delta) }));
+    expect((await reader.next()).type).toBe("ack");
+
+    const ws2 = await connect(boardId);
+    const reader2 = messageReader(ws2);
+    sendHello(ws2, { guestId: ownerId, displayName: "Owner", actorId: newActorId() });
+    const welcome2 = await reader2.next();
+    expect(welcome2.type).toBe("welcome");
+    if (welcome2.type !== "welcome") throw new Error("expected welcome");
+    expect(welcome2.meta.revealed).toBe(false);
+    expect(welcome2.meta.authors).toEqual({});
 
     ws.close();
     ws2.close();

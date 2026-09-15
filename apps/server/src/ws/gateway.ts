@@ -3,7 +3,9 @@
 // (ops/validate.js). T-011 добавил V6 (права/фазы, ops/permissions.js) для
 // операций над стикерами/action item и команду `setPhase`. T-012 добавил V7
 // (голоса, ops/votes.js), команду `resetVotes` и очередь операций одной
-// доски (ws/board-queue.js — пока сквозная, см. её шапку).
+// доски (ws/board-queue.js — пока сквозная, см. её шапку). T-013 добавил
+// проекцию видимости `proj_u` (welcome/op, пока `collect`) и досылку
+// скрытого после `reveal` (ops/visibility.js).
 //
 // Остальные команды (grantFacilitator/timer) — по-прежнему не здесь.
 
@@ -21,18 +23,20 @@ import {
 import type { FastifyInstance } from "fastify";
 import type { RawData } from "ws";
 import * as boardsService from "../boards/service.js";
-import { authorOf, recordAuthor } from "../ops/authors.js";
+import { authorOf, authorsForBoard, recordAuthor } from "../ops/authors.js";
 import {
   actorClock,
   appendOp,
   type Db,
   findOp,
   findUnvoteSeq,
+  opsSince,
   replayFromSnapshot,
   welcomeData,
 } from "../ops/log.js";
 import { checkPermission, classifyAction } from "../ops/permissions.js";
 import { validateOp } from "../ops/validate.js";
+import { isEmptyDelta, projectHidden, projectVisible } from "../ops/visibility.js";
 import { checkVoteLimit, checkVoteOwnership, checkVotePermission } from "../ops/votes.js";
 import { BoardHub, type Subscriber } from "./board-hub.js";
 import { createBoardQueue } from "./board-queue.js";
@@ -57,6 +61,33 @@ function buildMeta(guest: {
     timer: guest.timer,
     authors: guest.authors,
   };
+}
+
+/**
+ * T-013 (protocol.md § 6 «Reveal», REQ-004 кр.1, REQ-006): «сервер
+ * рассылает всем... `op` с сущностями, которые получатель раньше не видел».
+ * Раньше не видел ровно то, что `projectVisible` отфильтровала бы для него,
+ * пока доска была в collect, — т.е. `projectHidden` по всему журналу доски
+ * с начала (снапшоты не роняют строки `ops`, только кэшируют replay, § 6
+ * `consistency-model.md`). Каждая строка журнала шлётся под своим НАСТОЯЩИМ
+ * `seq` (а не синтетическим) — это тот же `op`, который получатель пропустил
+ * бы живьём, если бы уже был на доске; merge на клиенте идемпотентен и не
+ * зависит от порядка (I1), так что более ранний `seq`, чем уже виденный
+ * получателем, безопасен.
+ */
+async function sendRevealCatchup(deps: WsGatewayDeps, boardId: string): Promise<void> {
+  const [rows, authorsMap] = await Promise.all([
+    opsSince(deps.db, boardId, 0),
+    authorsForBoard(deps.db, boardId),
+  ]);
+  for (const subscriber of deps.hub.subscribers(boardId)) {
+    for (const row of rows) {
+      const hidden = projectHidden(row.delta, (id) => authorsMap.get(id), subscriber.guestId);
+      if (!isEmptyDelta(hidden)) {
+        deps.hub.send(subscriber, { type: "op", seq: row.seq, delta: hidden });
+      }
+    }
+  }
 }
 
 export interface WsGatewayDeps {
@@ -143,13 +174,23 @@ export function registerBoardWebSocket(app: FastifyInstance, deps: WsGatewayDeps
           deps.hub.subscribe(boardId, subscriber);
 
           const welcome = await welcomeData(deps.db, boardId, message.lastSeq);
+          // proj_u (T-013, REQ-006): пока доска в collect, welcome — тоже
+          // проекция получателя (protocol.md § 5 `welcome`: «всё — уже в
+          // проекции proj_u»), не только живые op/broadcast.
+          const authorsMap = guest.revealed ? null : await authorsForBoard(deps.db, boardId);
+          const project = (delta: WireDelta) =>
+            authorsMap ? projectVisible(delta, (id) => authorsMap.get(id), message.guestId) : delta;
           send(socket, {
             type: "welcome",
             role: guest.role,
             voterToken: computeVoterToken(deps.voterTokenSecret, boardId, message.guestId),
             meta: buildMeta(guest),
-            snapshot: welcome.snapshot,
-            ops: welcome.ops,
+            snapshot: welcome.snapshot
+              ? { upToSeq: welcome.snapshot.upToSeq, state: project(welcome.snapshot.state) }
+              : null,
+            ops: welcome.ops
+              .map((row) => ({ seq: row.seq, delta: project(row.delta) }))
+              .filter((row) => !isEmptyDelta(row.delta)),
           });
           return;
         }
@@ -216,12 +257,16 @@ export function registerBoardWebSocket(app: FastifyInstance, deps: WsGatewayDeps
               return;
             }
 
+            // Фаза нужна и V6 (если операция гейтится), и проекции видимости
+            // ниже (T-013) — одним запросом на op, не по одному на каждое
+            // применение.
+            const phase = phaseSchema.parse(await boardsService.getBoardPhase(deps.db, boardId));
+
             // V6 (T-011): права/фаза для стикеров и action item. `null` от
             // classifyAction — операция вне области T-011 (группы, поля
             // action item кроме создания, vote/unvote) — пропускается.
             const action = classifyAction(state, message.delta);
             if (action) {
-              const phaseRaw = await boardsService.getBoardPhase(deps.db, boardId);
               const [entry] = message.delta.entries;
               const isOwn =
                 (action === "editSticker" || action === "moveSticker") && entry
@@ -229,7 +274,7 @@ export function registerBoardWebSocket(app: FastifyInstance, deps: WsGatewayDeps
                   : true;
               const permission = checkPermission({
                 role: sub.role,
-                phase: phaseSchema.parse(phaseRaw),
+                phase,
                 action,
                 isOwn,
               });
@@ -316,7 +361,24 @@ export function registerBoardWebSocket(app: FastifyInstance, deps: WsGatewayDeps
             });
 
             send(socket, { type: "ack", dot, seq });
-            deps.hub.broadcast(boardId, { type: "op", seq, delta: message.delta }, sub);
+
+            // proj_u (T-013, REQ-006): пока collect, у каждого получателя —
+            // своя проекция этой же дельты (обычно один и тот же стикер: либо
+            // целиком виден, либо целиком скрыт, т.к. клиентская дельта — одна
+            // сущность, V2). После collect фильтровать нечего — шлём как есть.
+            if (phase === "collect") {
+              const authorsMap = await authorsForBoard(deps.db, boardId);
+              deps.hub.broadcastEach(boardId, sub, (subscriber) => {
+                const projected = projectVisible(
+                  message.delta,
+                  (id) => authorsMap.get(id),
+                  subscriber.guestId,
+                );
+                return isEmptyDelta(projected) ? null : { type: "op", seq, delta: projected };
+              });
+            } else {
+              deps.hub.broadcast(boardId, { type: "op", seq, delta: message.delta }, sub);
+            }
           });
           return;
         }
@@ -324,6 +386,11 @@ export function registerBoardWebSocket(app: FastifyInstance, deps: WsGatewayDeps
         if (message.type === "command") {
           await queue.run(boardId, async () => {
             if (message.command.type === "setPhase") {
+              // T-013, REQ-004 кр.1/REQ-006: reveal — это именно ПЕРВЫЙ уход
+              // из collect (protocol.md § 6 «Reveal»), нужна фаза ДО перехода,
+              // иначе неотличимо от смены между `group`/`vote`/`discuss`/`actions`,
+              // где никакой досылки уже не нужно (revealed давно true).
+              const phaseBefore = await boardsService.getBoardPhase(deps.db, boardId);
               const result = await boardsService.setPhase(deps.db, {
                 boardId,
                 guestId: sub.guestId,
@@ -336,6 +403,9 @@ export function registerBoardWebSocket(app: FastifyInstance, deps: WsGatewayDeps
                   guestId: sub.guestId,
                 });
                 if (guest) deps.hub.broadcast(boardId, { type: "meta", meta: buildMeta(guest) });
+
+                const isReveal = phaseBefore === "collect" && message.command.phase !== "collect";
+                if (isReveal) await sendRevealCatchup(deps, boardId);
                 return;
               }
               if (result === "not_found") {
