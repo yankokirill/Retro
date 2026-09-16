@@ -9,10 +9,30 @@
 //
 // `--replay`/`--minimize` (SIM-10) — T-027, здесь их нет (docs/tasks.md § 7.1).
 
+import { applyEvent } from "./apply.js";
+import {
+  checkAck,
+  checkAckedOpsPersist,
+  checkClientsMatchOracle,
+  checkMessageSchema,
+  checkNoAuthorLeak,
+  checkNoRejectedResidue,
+  checkReject,
+  checkScreensAgree,
+  checkSnapshotConsistency,
+  checkVoteLimit,
+  checkWellFormedFull,
+  checkWellFormedIncremental,
+} from "./checks.js";
 import type { SimConfig } from "./config.js";
-import type { Event } from "./events.js";
+import { drain } from "./drain.js";
+import { type Candidate, type Event, enabledEvents, resolveCandidate } from "./events.js";
+import { foldNewRows } from "./oracle.js";
+import { createPrng, type Prng } from "./prng.js";
 import type { Stats } from "./stats.js";
 import type { Violation } from "./violation.js";
+import { createWellFormedState, type WellFormedState } from "./well-formed.js";
+import { createWorld, type World } from "./world.js";
 
 export type RunResult =
   | { readonly ok: true; readonly decisions: readonly Event[]; readonly stats: Stats }
@@ -23,6 +43,177 @@ export type RunResult =
       readonly stats: Stats;
     };
 
+const KIND_ORDER = [
+  "act",
+  "deliver",
+  "cut",
+  "serverNotice",
+  "connect",
+  "reload",
+  "command",
+  "snapshot",
+  "storeFault",
+] as const;
+
+function eventWeight(world: World, kind: Candidate["kind"]): number {
+  const events = world.config.profile.events;
+  switch (kind) {
+    case "act":
+      return events.act;
+    case "deliver":
+      return events.deliver;
+    case "cut":
+      return events.cut;
+    case "serverNotice":
+      return events.serverNotice;
+    case "connect":
+      return events.connect;
+    case "reload":
+      return events.reload;
+    case "command":
+      return events.command;
+    case "snapshot":
+      return events.snapshot;
+    case "storeFault":
+      return events.storeFault;
+  }
+}
+
+/**
+ * Выбор события — сначала вид (E1..E9) взвешенно по профилю, затем
+ * конкретный кандидат этого вида равномерно, начиная со случайного
+ * смещения. Если ни один кандидат выбранного вида не резолвится
+ * (`generateIntent`/`generateCommand` не нашли, что предложить) — вид
+ * исключается из рассмотрения на этом шаге, пробуем следующий по весу.
+ */
+function chooseEvent(world: World, candidates: readonly Candidate[], prng: Prng): Event | null {
+  const remainingKinds = new Set(candidates.map((c) => c.kind));
+
+  while (remainingKinds.size > 0) {
+    const weighted: (readonly [Candidate["kind"], number])[] = KIND_ORDER.filter((k) =>
+      remainingKinds.has(k),
+    ).map((k) => [k, eventWeight(world, k)] as const);
+    const totalWeight = weighted.reduce((sum, [, w]) => sum + w, 0);
+
+    const kinds = [...remainingKinds];
+    const kind = totalWeight > 0 ? prng.pick(weighted) : kinds[prng.int(0, kinds.length - 1)];
+    if (kind === undefined) return null;
+
+    const pool = candidates.filter((c) => c.kind === kind);
+    const offset = pool.length > 0 ? prng.int(0, pool.length - 1) : 0;
+    for (let i = 0; i < pool.length; i++) {
+      const candidate = pool[(offset + i) % pool.length];
+      if (!candidate) continue;
+      const event = resolveCandidate(world, candidate, prng);
+      if (event) return event;
+    }
+    remainingKinds.delete(kind);
+  }
+  return null;
+}
+
+/** `applyEvent` + пошаговые проверки над наблюдением этого шага (S1 инкрементально, S2, S3, S7, S10, S11). */
+async function step(
+  world: World,
+  event: Event,
+  wellFormedState: WellFormedState,
+  prng: Prng,
+): Promise<Violation | null> {
+  const observation = await applyEvent(world, event, prng);
+
+  if (observation.newLogRows.length > 0) {
+    foldNewRows(world.oracle, observation.newLogRows);
+    for (const row of observation.newLogRows) {
+      const violation = checkWellFormedIncremental(wellFormedState, row, world.acts);
+      if (violation) return violation;
+    }
+    const voteViolation = checkVoteLimit(world, world.acts);
+    if (voteViolation) return voteViolation;
+  }
+
+  for (const ack of observation.acks) {
+    const violation = checkAck(world, ack, world.acts);
+    if (violation) return violation;
+  }
+  for (const reject of observation.rejects) {
+    const violation = checkReject(world, reject, world.acts);
+    if (violation) return violation;
+  }
+  for (const outgoing of observation.outgoing) {
+    const violation = checkNoAuthorLeak(world, outgoing, world.acts);
+    if (violation) return violation;
+  }
+  for (const sent of observation.sentRaw) {
+    const violation = checkMessageSchema(sent.direction, sent.raw, world.acts);
+    if (violation) return violation;
+  }
+  return null;
+}
+
+/** Досылка (SIM-07) + проверки, верные только «в покое»: S4, S5, S6, S7 (резидуа), S8, полный S1. */
+async function checkpoint(
+  world: World,
+  prng: Prng,
+  decisions: Event[],
+  wellFormedState: WellFormedState,
+): Promise<Violation | null> {
+  const drainViolation = await drain(world, prng, decisions, (event) =>
+    step(world, event, wellFormedState, prng),
+  );
+  if (drainViolation) return drainViolation;
+
+  world.stats.checkpoints += 1;
+
+  const fullViolation = checkWellFormedFull(world.store.log(world.boardId), world.acts);
+  if (fullViolation) return fullViolation;
+
+  const s4 = checkClientsMatchOracle(world, world.acts);
+  if (s4) return s4;
+  const s5 = checkScreensAgree(world, world.acts);
+  if (s5) return s5;
+  const s6 = checkAckedOpsPersist(world, world.acts);
+  if (s6) return s6;
+  const s7 = checkNoRejectedResidue(world, world.acts);
+  if (s7) return s7;
+  const s8 = checkSnapshotConsistency(world, world.snapshotsObserved, world.acts);
+  world.snapshotsObserved.length = 0;
+  if (s8) return s8;
+
+  return null;
+}
+
+function ok(decisions: readonly Event[], stats: Stats): RunResult {
+  return { ok: true, decisions, stats };
+}
+
+function fail(violation: Violation, decisions: readonly Event[], stats: Stats): RunResult {
+  return { ok: false, violation, decisions, stats };
+}
+
 export async function runSimulation(config: SimConfig): Promise<RunResult> {
-  throw new Error("runSimulation: not implemented");
+  const prng = createPrng(config.seed);
+  const world = createWorld(config, prng);
+  const wellFormedState = createWellFormedState();
+  const decisions: Event[] = [];
+  let nextCheckpoint = prng.int(config.checkpointMin, config.checkpointMax);
+
+  while (world.acts < config.ops) {
+    const candidates = enabledEvents(world, "run");
+    const event = chooseEvent(world, candidates, prng);
+    if (!event) break; // мир не может сделать ни шага — завершаем прогон как есть
+
+    decisions.push(event);
+    world.stats.steps += 1;
+    const violation = await step(world, event, wellFormedState, prng);
+    if (violation) return fail(violation, decisions, world.stats);
+
+    if (world.acts >= nextCheckpoint) {
+      const violation2 = await checkpoint(world, prng, decisions, wellFormedState);
+      if (violation2) return fail(violation2, decisions, world.stats);
+      nextCheckpoint = world.acts + prng.int(config.checkpointMin, config.checkpointMax);
+    }
+  }
+
+  const violation = await checkpoint(world, prng, decisions, wellFormedState);
+  return violation ? fail(violation, decisions, world.stats) : ok(decisions, world.stats);
 }

@@ -116,6 +116,12 @@ function baseWorld(
     recent: [],
     stats: createStats(),
     oracle: createOracleState(),
+    // world.ts § шаг 4б: поля добавлены при реализации apply.ts (накопление
+    // наблюдений между E8/E9 и следующей контрольной точкой) — checks.ts их
+    // не читает сам (S8 берёт snapshots явным параметром), нейтральные
+    // значения по умолчанию здесь ничего не меняют в тестах S2–S11.
+    snapshotsObserved: [],
+    pendingStoreFault: false,
     ...overrides,
   };
 }
