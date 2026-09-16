@@ -75,18 +75,35 @@ export function registerBoardWebSocket(app: FastifyInstance, deps: WsGatewayDeps
           .then((result) => {
             // Каждое исходящее сообщение — своему адресату (`message.to`),
             // не обязательно тому же сокету, что прислал raw (broadcast).
+            // Изоляция по получателю (code-review PR #20, находка 2): если
+            // send одному сокету бросит (например, тот уже в состоянии
+            // CLOSING), это не должно ни прервать доставку остальным, ни
+            // закрыть чужой сокет-инициатор, который тут вообще ни при чём.
             for (const message of result.outgoing) {
-              sockets.get(message.to)?.send(message.raw);
+              const target = sockets.get(message.to);
+              if (!target) continue;
+              try {
+                target.send(message.raw);
+              } catch (error) {
+                app.log.error(error, `ws send failed (board=${boardId}, to=${message.to})`);
+              }
             }
             for (const closingConnection of result.close) {
-              sockets.get(closingConnection)?.close();
+              const target = sockets.get(closingConnection);
+              if (!target) continue;
+              try {
+                target.close();
+              } catch (error) {
+                app.log.error(error, `ws close failed (board=${boardId}, id=${closingConnection})`);
+              }
             }
           })
           .catch((error: unknown) => {
             // Защита в глубину: createBoardServer сам ловит все ошибки
             // обработчиков и превращает их в error+close (см. board-server.ts) —
             // сюда долетает только то, что сломалось уже на границе адаптера
-            // (например сам socket.send).
+            // (например сама server.receive(), см. board-server.ts "was not
+            // open()ed"). Закрываем только СВОЙ сокет — тот, что прислал raw.
             app.log.error(error, `ws adapter failed (board=${boardId})`);
             socket.close();
           });

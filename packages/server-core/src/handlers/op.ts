@@ -81,19 +81,34 @@ export async function handleOp(
   if (!board) throw new Error(`op: board unexpectedly not found (boardId=${boardId})`);
   const phase = phaseSchema.parse(board.phase);
 
+  // Порт BoardStore не даёт lookup автора одной сущности (только всех сразу,
+  // store.authors) — apps/server использовал более узкий authorOf(db,
+  // boardId, entityId). Полный проход по (небольшой, REQ-023: сотни
+  // операций) таблице авторов доски делается максимум ОДИН раз за вызов
+  // (code-review PR #20, находка 4), а не дважды (isOwn ниже + проекция
+  // рассылки в конце) — безопасно мемоизировать: весь handleOp выполняется
+  // внутри очереди доски (SIM-05), конкурентной записи в authors между
+  // этими двумя чтениями быть не может, а если СВОЯ запись этого вызова
+  // (tx.recordAuthor ниже) и добавит нового автора, то только для
+  // created-дельты — а тогда classifyAction возвращает createSticker/
+  // createAction/null, не editSticker/moveSticker, и до первого чтения
+  // authorsMap() ниже дело не доходит вовсе (isOwn — true по короткому
+  // замыканию), так что второе чтение (после записи) в этом случае как раз
+  // остаётся первым и единственным.
+  let authorsMapPromise: Promise<ReadonlyMap<string, string>> | null = null;
+  const authorsMap = (): Promise<ReadonlyMap<string, string>> => {
+    authorsMapPromise ??= ctx.store.authors(boardId);
+    return authorsMapPromise;
+  };
+
   // V6 (T-011): права/фаза для стикеров и action item. `null` от
   // classifyAction — операция вне области T-011, пропускается.
   const action = classifyAction(state, message.delta);
   if (action) {
     const [entry] = message.delta.entries;
-    // Порт BoardStore не даёт lookup автора одной сущности (только всех
-    // сразу, store.authors) — apps/server использовал более узкий
-    // authorOf(db, boardId, entityId). Тот же результат, один лишний
-    // проход по (небольшой, REQ-023: сотни операций) таблице авторов
-    // доски вместо точечного запроса — не влияет на корректность.
     const isOwn =
       (action === "editSticker" || action === "moveSticker") && entry
-        ? (await ctx.store.authors(boardId)).get(entry.key.entity) === sub.guestId
+        ? (await authorsMap()).get(entry.key.entity) === sub.guestId
         : true;
     const permission = checkPermission({ role: sub.role, phase, action, isOwn });
     if (!permission.ok) {
@@ -158,14 +173,10 @@ export async function handleOp(
   // proj_u (T-013, REQ-006): пока collect, у каждого получателя — своя
   // проекция этой же дельты. После collect фильтровать нечего — шлём как есть.
   if (phase === "collect") {
-    const authorsMap = await ctx.store.authors(boardId);
+    const authors = await authorsMap();
     for (const subscriber of ctx.registry.subscribersOf(boardId)) {
       if (subscriber.connection === connection) continue;
-      const projected = projectVisible(
-        message.delta,
-        (id) => authorsMap.get(id),
-        subscriber.guestId,
-      );
+      const projected = projectVisible(message.delta, (id) => authors.get(id), subscriber.guestId);
       if (!isEmptyDelta(projected)) {
         ctx.sink.send(subscriber.connection, { type: "op", seq, delta: projected });
       }

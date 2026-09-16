@@ -140,7 +140,13 @@ export function createBoardServer(ports: ServerCorePorts): BoardServer {
   function receive(connection: ConnectionId, raw: string): Promise<ReceiveResult> {
     const boardId = boardIdByConnection.get(connection);
     if (boardId === undefined) {
-      throw new Error(`receive: connection ${connection} was not open()ed`);
+      // Отклонённый промис, не синхронный throw (code-review PR #20,
+      // находка 1): receive() возвращает Promise<ReceiveResult> по контракту
+      // — вызывающий вправе делать server.receive(...).then(...) без try/
+      // catch вокруг самого вызова (как и делает apps/server/src/ws/
+      // gateway.ts). Синхронный throw обходил бы эту цепочку целиком и
+      // вылетал бы как необработанное исключение из слушателя "message".
+      return Promise.reject(new Error(`receive: connection ${connection} was not open()ed`));
     }
 
     const outgoing: Outgoing[] = [];
