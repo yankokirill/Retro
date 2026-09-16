@@ -4,6 +4,14 @@
 
 import type { Dot, EntityId, State, WireDelta } from "@retro/crdt";
 import { compact as compactState, empty, fromWire, merge, toWire } from "@retro/crdt";
+import type {
+  ActorClock,
+  AppendOpParams,
+  AppendOpResult,
+  OpRow,
+  ReplayResult,
+  SnapshotRecord,
+} from "@retro/server-core";
 import { and, asc, desc, eq, gt, lte, max, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "../db/schema.js";
@@ -11,25 +19,9 @@ import { ops, snapshots } from "../db/schema.js";
 
 export type Db = NodePgDatabase<typeof schema>;
 
-export interface AppendOpParams {
-  readonly boardId: string;
-  /**
-   * `null` — только для `unvote`: `Unvote.dot` в CRDT-модели (T-002) — dot
-   * **отзываемого голоса**, не свежий dot самой операции отзыва (`unvote`
-   * не тикает часы), поэтому у него нет собственной пары `(actor, counter)`
-   * для идемпотентности на уровне журнала (см. JSDoc `ops` в `db/schema.ts`).
-   * Для всех остальных операций (create/write/vote) — их собственный dot.
-   */
-  readonly dot: Dot | null;
-  /** `null` — у `vote`/`unvote` метки нет (§ 3.1, 2P-set); для остальных операций — метка её записи. */
-  readonly lamport: number | null;
-  /** Ровно то, что несла одна операция (§ 3 `protocol.md`) — уже в проводном формате. */
-  readonly delta: WireDelta;
-}
-
-export interface AppendOpResult {
-  readonly seq: number;
-}
+// T-024: типы порта BoardStore — реэкспорт из @retro/server-core (не
+// собственное определение), см. docs/design/T-005-simulator.md § 3.2.
+export type { ActorClock, AppendOpParams, AppendOpResult, OpRow, ReplayResult, SnapshotRecord };
 
 /**
  * REQ-023 (кр. 3). Для `dot !== null` — идемпотентно по
@@ -132,15 +124,6 @@ export async function findUnvoteSeq(
   return row?.seq ?? null;
 }
 
-export interface ActorClock {
-  /** `last_n(a)` (V1): наибольший `counter`, принятый для этого актора на этой доске; 0, если ни одного. */
-  readonly lastCounter: number;
-  /** `last_L(a)` (V5): наибольшая метка `lamport`, принятая для этого актора; 0, если ни одной (у vote/unvote её нет). */
-  readonly lastLamport: number;
-  /** `L_S` (V5): наибольшая метка `lamport`, принятая на доске вообще (любым актором); 0, если ни одной. */
-  readonly boardMaxLamport: number;
-}
-
 /**
  * T-010, V1+V5. Три числа для проверки свежести dot и метки нового
  * `create`/`write`/`vote`; для `vote` `lastLamport`/`boardMaxLamport` не
@@ -166,11 +149,6 @@ export async function actorClock(db: Db, boardId: string, actor: string): Promis
   };
 }
 
-export interface OpRow {
-  readonly seq: number;
-  readonly delta: WireDelta;
-}
-
 /** Операции доски со `seq > sinceSeq`, по возрастанию `seq` (переподключение, protocol.md § 6). */
 export async function opsSince(db: Db, boardId: string, sinceSeq: number): Promise<OpRow[]> {
   return db
@@ -194,9 +172,18 @@ export async function opsUpTo(db: Db, boardId: string, uptoSeq: number): Promise
     .orderBy(asc(ops.seq));
 }
 
-export interface ReplayResult {
-  readonly state: State;
-  readonly uptoSeq: number;
+/**
+ * Последний `seq` доски (0, если журнал пуст) — T-024, `PgBoardStore.lastSeq`
+ * (порт `BoardStore`, store.ts). Тот же запрос, что `boards/service.ts`
+ * `setPhase` уже делал инлайново для вычисления `revealSeq` (T-026); здесь —
+ * отдельная переиспользуемая функция, а не дубль.
+ */
+export async function lastSeq(db: Db, boardId: string): Promise<number> {
+  const [row] = await db
+    .select({ maxSeq: max(ops.seq) })
+    .from(ops)
+    .where(eq(ops.boardId, boardId));
+  return row?.maxSeq ?? 0;
 }
 
 /** X_S(n) — replay всего журнала доски с начала (§ 6). `uptoSeq` — seq последней применённой операции (0, если журнал пуст). */
@@ -230,13 +217,8 @@ export async function replayFromSnapshot(db: Db, boardId: string): Promise<Repla
   return { state, uptoSeq };
 }
 
-export interface SnapshotResult {
-  readonly uptoSeq: number;
-  readonly state: State;
-}
-
 /** `null` — снапшотов для доски ещё нет. Среди нескольких строк — с максимальным `uptoSeq`. */
-export async function loadLatestSnapshot(db: Db, boardId: string): Promise<SnapshotResult | null> {
+export async function loadLatestSnapshot(db: Db, boardId: string): Promise<SnapshotRecord | null> {
   const [row] = await db
     .select({ uptoSeq: snapshots.uptoSeq, state: snapshots.state })
     .from(snapshots)
