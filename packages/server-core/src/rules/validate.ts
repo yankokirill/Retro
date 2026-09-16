@@ -1,22 +1,26 @@
 // T-010 — правила приёма операции сервером: V1 (свежий dot), V3 (цель
 // существует), V4 (перекрытие обосновано), V5 (метка) — docs/spec/
 // consistency-model.md § 7, REQ-024 кр. 2. V2 (форма) уже обеспечена
-// zod-схемой `clientDeltaSchema` (packages/protocol) на входе в
-// `ws/gateway.ts` — сюда попадает только уже валидная по форме дельта, эту
-// проверку заново не делаем. V6 (права/фазы) и V7 (голоса) — T-011, T-012,
-// тоже не здесь.
+// zod-схемой `clientDeltaSchema` (packages/protocol) на входе (сервер:
+// handlers/op.ts; симулятор: генератор через ядро клиента, SIM-06) — сюда
+// попадает только уже валидная по форме дельта, эту проверку заново не
+// делаем. V6 (права/фазы) и V7 (голоса) — T-011, T-012, тоже не здесь.
 //
 // ADR-0008: V1 (весь целиком, включая привязку к actorId соединения) НЕ
 // применяется к `unvote` — его `dot` в проводном формате это dot ОТЗЫВАЕМОГО
 // голоса (чужая, более ранняя операция `vote`), не собственный dot операции
-// отзыва. Принадлежность голоса пользователю — V7 (`ops/votes.ts`
+// отзыва. Принадлежность голоса пользователю — V7 (`rules/votes.ts`
 // `checkVoteOwnership`, сравнивает по `voterToken`, не по `actorId`).
+//
+// T-024: переехала из apps/server/src/ops/validate.ts (реэкспорт там
+// остаётся) без изменения поведения; `ActorClock` теперь из `../store.js`
+// (порт `BoardStore`), не из `apps/server` `ops/log.ts`.
 
 import type { EntityId, Field, Kind, State, WireDelta } from "@retro/crdt";
 import { entityKind, entryAt, supersedeRecorded } from "@retro/crdt";
 import type { RejectReason } from "@retro/protocol";
 import { operationDot } from "@retro/protocol";
-import type { ActorClock } from "./log.js";
+import type { ActorClock } from "../store.js";
 
 /** § 1.4 `consistency-model.md`: какие поля есть у какого вида сущности — V3 «правка нужного вида». */
 const FIELDS_BY_KIND: Record<Kind, ReadonlySet<Field>> = {
@@ -36,13 +40,13 @@ const FIELDS_BY_KIND: Record<Kind, ReadonlySet<Field>> = {
 export const MAX_LAMPORT_AHEAD = 1000;
 
 export interface ValidateOpParams {
-  /** X_S — текущее состояние доски: `replay`/`replayFromSnapshot` из `ops/log.ts`. */
+  /** X_S — текущее состояние доски: `store.currentState(boardId)`. */
   readonly state: State;
   /**
-   * actorId, заявленный этим WS-соединением в `hello` (`ws/gateway.ts`).
-   * V1 «owner(a) = u»: dot операции обязан принадлежать этому актору — иначе
-   * `stale_dot`. Применяется к `create`/`write`/`vote`; НЕ применяется к
-   * `unvote` (ADR-0008, см. шапку файла) — его `dot` не собственный.
+   * actorId, заявленный этим соединением в `hello`. V1 «owner(a) = u»: dot
+   * операции обязан принадлежать этому актору — иначе `stale_dot`.
+   * Применяется к `create`/`write`/`vote`; НЕ применяется к `unvote`
+   * (ADR-0008, см. шапку файла) — его `dot` не собственный.
    */
   readonly connectionActorId: string;
   /** Один клиентский `op` — уже прошёл `clientDeltaSchema` (ровно одна операция). */

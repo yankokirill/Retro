@@ -1,15 +1,18 @@
 // T-012 — голоса (V7, docs/spec/consistency-model.md § 7; REQ-014,
 // REQ-015 (кр. 2, 6), REQ-016). Роль/фаза, лимит и владение — три разных
-// проверки, разнесены по функциям так же, как V6 (`ops/permissions.ts`)
+// проверки, разнесены по функциям так же, как V6 (`rules/permissions.ts`)
 // разносит роль/фазу и владение сущностью; в отличие от V6 это отдельный
 // модуль, не расширение `classifyAction`/`checkPermission` — те два теста
-// (`apps/server/test/permissions.test.ts`, T-011) уже фиксируют, что
-// `classifyAction` возвращает `null` для vote/unvote, и это остаётся верным:
-// голоса не являются `StickerAction`.
+// уже фиксируют, что `classifyAction` возвращает `null` для vote/unvote, и
+// это остаётся верным: голоса не являются `StickerAction`.
 //
 // `resetVotes` (REQ-016) сюда не входит — это не проверка, а массовое
-// действие с доступом к журналу и рассылке (`ws/gateway.ts`), роль для
-// него проверяется в `boards/service.ts` `resetVotes` (мирроринг `setPhase`).
+// действие с доступом к журналу и рассылке (`handlers/command.ts`), роль
+// для него проверяется в `rules/board.ts` `checkResetVotes` (мирроринг
+// `checkSetPhase`).
+//
+// T-024: переехала из apps/server/src/ops/votes.ts (реэкспорт там остаётся)
+// без изменения поведения.
 
 import type { Dot, EntityId, State } from "@retro/crdt";
 import { activeVotes } from "@retro/crdt";
@@ -31,7 +34,7 @@ export interface CheckVotePermissionParams {
  * REQ-015, «Роли/фазы»: `owner`/`facilitator` — любая фаза; `participant` —
  * только `vote`; `viewer` — никогда. Не знает о лимите/владении — те
  * `checkVoteLimit`/`checkVoteOwnership` ниже. Объект-параметр — как
- * `checkPermission` (`ops/permissions.ts`, V6), для единообразия стиля.
+ * `checkPermission` (`rules/permissions.ts`, V6), для единообразия стиля.
  */
 export function checkVotePermission(params: CheckVotePermissionParams): CheckVoteResult {
   const { role, phase, action } = params;
@@ -53,14 +56,14 @@ function reject(reason: RejectReason, message: string): CheckVoteResult {
  *
  * `claimedVoterToken` — то, что клиент прислал в `WireDelta.votes[0].user`;
  * `connectionVoterToken` — то, что сервер сам посчитал для этого соединения
- * (`computeVoterToken` по `guestId` из `hello`, `ws/voter-token.ts`).
- * Несовпадение — попытка голосовать от чужого анонимного токена (обошла бы
- * собственный лимит и списала бы голос на чужой счёт, см.
- * `consistency-model.md` § 3.1: `vote(id): V⁺ = {(d, owner(a), id)}` — поле
- * голоса обязано быть `owner(a)`, не произвольным вводом клиента; это тот
- * же принцип, что V1 «owner(a) = u» для dot, только для анонимного поля
- * голоса). Тот же `RejectReason`, что и для отзыва чужого голоса
- * (`not_own_vote`) — оба случая семантически «не ваш голос».
+ * (`voterToken` порт `ServerCorePorts`). Несовпадение — попытка голосовать
+ * от чужого анонимного токена (обошла бы собственный лимит и списала бы
+ * голос на чужой счёт, см. `consistency-model.md` § 3.1: `vote(id): V⁺ =
+ * {(d, owner(a), id)}` — поле голоса обязано быть `owner(a)`, не
+ * произвольным вводом клиента; это тот же принцип, что V1 «owner(a) = u»
+ * для dot, только для анонимного поля голоса). Тот же `RejectReason`, что и
+ * для отзыва чужого голоса (`not_own_vote`) — оба случая семантически «не
+ * ваш голос».
  */
 export function checkVoteLimit(
   state: State,

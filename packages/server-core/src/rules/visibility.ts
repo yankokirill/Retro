@@ -1,12 +1,16 @@
 // T-013 — проекция видимости `proj_u` (docs/spec/consistency-model.md § 5,
 // REQ-006). Чистая функция: видимость сущности решает только то, был ли для
-// неё записан автор (`ops/authors.ts`, только `kind === "sticker"`) и
+// неё записан автор (`store.authors`, только `kind === "sticker"`) и
 // совпадает ли он с получателем — группы/action item авторства не имеют и
 // поэтому всегда видимы (REQ-006 говорит только про стикеры: «участник
 // видит только стикеры, автором которых является он сам»). Решение о ТОМ,
 // когда вообще фильтровать (только пока `phase === "collect"`, до reveal) —
-// не здесь, а на стороне вызывающего (`ws/gateway.ts`): вне `collect`
-// `projectVisible`/`projectHidden` не вызываются, дельта идёт как есть.
+// не здесь, а на стороне вызывающего (`handlers/hello.ts`/`handlers/op.ts`):
+// вне `collect` `projectVisible`/`projectHidden` не вызываются, дельта идёт
+// как есть.
+//
+// T-024: переехала из apps/server/src/ops/visibility.ts (реэкспорт там
+// остаётся) без изменения поведения.
 
 import type { EntityId, WireDelta } from "@retro/crdt";
 
@@ -37,10 +41,11 @@ export function projectVisible(delta: WireDelta, authorOf: AuthorOf, guestId: st
 
 /**
  * Дополнение `projectVisible` — то, что было скрыто от `guestId` именно
- * потому, что принадлежит другому автору. Используется один раз, в момент
- * `reveal` (protocol.md § 6): «сервер рассылает... `op` с сущностями,
- * которые получатель раньше не видел» — раньше не видел ровно то, что не
- * прошло бы `projectVisible` для него, пока доска была в `collect`.
+ * потому, что принадлежит другому автору. Используется в момент `reveal`
+ * (protocol.md § 6): «сервер рассылает... `op` с сущностями, которые
+ * получатель раньше не видел» — раньше не видел ровно то, что не прошло бы
+ * `projectVisible` для него, пока доска была в `collect`. Также используется
+ * досылкой при переподключении после `reveal` (T-026, H1).
  */
 export function projectHidden(delta: WireDelta, authorOf: AuthorOf, guestId: string): WireDelta {
   return filterDelta(delta, (id) => {

@@ -26,7 +26,7 @@
 // ниже теперь зелёные.
 
 import { describe, expect, it } from "vitest";
-import { createBoardQueue } from "../src/ws/board-queue.js";
+import { createBoardQueue } from "../src/queue.js";
 
 /** Промис, который тест разрешает вручную — без setTimeout/гонок по времени. */
 function deferred<T = void>() {

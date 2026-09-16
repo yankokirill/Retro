@@ -2,12 +2,21 @@
 // ADR-0007). Функции берут `db` параметром, а не импортируют синглтон из
 // `db/client.ts` — тестируемо без переменных окружения (Testcontainers
 // передаёт своё подключение).
+//
+// T-024 (code-review PR #20, находка 3): `setPhase`/`resetVotes`/
+// `getBoardPhase`/`getBoardVoteSettings` отсюда удалены — живой путь смены
+// фазы и сброса голосов теперь `packages/server-core/src/handlers/
+// command.ts` + `rules/board.ts` (WS `command`, ADR-0009). Держать здесь
+// вторую копию той же логики значило бы дать ей молча разойтись с реальным
+// поведением: правка здесь проходила бы `npm run check`, ничего не меняя
+// для единственного настоящего вызывающего (`ws/gateway.ts`).
 
-import type { Phase, Role } from "@retro/protocol";
-import { and, eq, isNull, max, or } from "drizzle-orm";
+import type { Role } from "@retro/protocol";
+import { resolveRole } from "@retro/server-core";
+import { and, eq, isNull, or } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "../db/schema.js";
-import { boards, members, ops } from "../db/schema.js";
+import { boards, members } from "../db/schema.js";
 import { authorsDisplayNames } from "../ops/authors.js";
 
 export type Db = NodePgDatabase<typeof schema>;
@@ -141,9 +150,10 @@ export interface BoardForGuest {
  * «нащупывается» по голому `boardId`). REST-слой превращает `null` в `404`.
  * `revealed` (T-013, REQ-004 кр.1): доска раскрыта ⇔ текущая фаза не
  * `collect` — тот же аргумент по индукции, что и `irreversible_phase` в
- * `setPhase` ниже: вернуться в `collect` нельзя, значит любая другая фаза
- * доказывает, что доска его уже покинула. `authors` — пусто до reveal
- * (REQ-006), после — из `authorsDisplayNames` (T-013, `ops/authors.ts`).
+ * `rules/board.ts` `checkSetPhase` (@retro/server-core, T-024, живой путь
+ * смены фазы — `handlers/command.ts`): вернуться в `collect` нельзя, значит
+ * любая другая фаза доказывает, что доска его уже покинула. `authors` —
+ * пусто до reveal (REQ-006), после — из `authorsDisplayNames` (T-013, `ops/authors.ts`).
  * `timer` — фиксированное значение, вне T-013 (REQ-019, отдельная задача).
  */
 export async function getBoardForGuest(
@@ -156,17 +166,16 @@ export async function getBoardForGuest(
     .where(and(eq(boards.id, params.boardId), isNull(boards.deletedAt)));
   if (!board) return null;
 
-  let role: Role;
-  if (board.ownerId === params.guestId) {
-    role = "owner";
-  } else {
+  let memberRole: Role | null = null;
+  if (board.ownerId !== params.guestId) {
     const [member] = await db
       .select({ role: members.role })
       .from(members)
       .where(and(eq(members.boardId, board.id), eq(members.userId, params.guestId)));
-    if (!member) return null;
-    role = member.role as Role;
+    memberRole = (member?.role as Role | undefined) ?? null;
   }
+  const role = resolveRole({ ownerId: board.ownerId, guestId: params.guestId, memberRole });
+  if (!role) return null;
 
   const revealed = board.phase !== "collect";
 
@@ -181,79 +190,6 @@ export async function getBoardForGuest(
     authors: revealed ? await authorsDisplayNames(db, board.id) : {},
     role,
   };
-}
-
-/** Текущая фаза доски; `null` — доска не существует/удалена (T-011, V6). */
-export async function getBoardPhase(db: Db, boardId: string): Promise<string | null> {
-  const [board] = await db
-    .select({ phase: boards.phase })
-    .from(boards)
-    .where(and(eq(boards.id, boardId), isNull(boards.deletedAt)));
-  return board?.phase ?? null;
-}
-
-export type SetPhaseResult = "ok" | "forbidden" | "irreversible_phase" | "not_found";
-
-export interface SetPhaseParams {
-  readonly boardId: string;
-  readonly guestId: string;
-  readonly phase: Phase;
-}
-
-/**
- * REQ-004 (кр. 2, 4). Роль проверяется здесь же (не через `ops/permissions.ts`
- * — та про CRDT-операции над стикерами/action item, `setPhase` — метаданные
- * доски, ближе по духу к `grantFacilitator` выше). `irreversible_phase`
- * (кр. 2): доска уже покидала `collect`, если её текущая фаза — не `collect`;
- * отдельного флага «уже раскрыта» не нужно — вернуться в `collect` можно
- * только из него самого, значит текущая фаза сама по себе доказывает факт
- * ухода (по индукции: если бы уход был возможен, эта же проверка отклонила
- * бы более раннюю попытку).
- */
-export async function setPhase(db: Db, params: SetPhaseParams): Promise<SetPhaseResult> {
-  const [board] = await db
-    .select({ ownerId: boards.ownerId, phase: boards.phase })
-    .from(boards)
-    .where(and(eq(boards.id, params.boardId), isNull(boards.deletedAt)));
-  if (!board) return "not_found";
-
-  let role: Role;
-  if (board.ownerId === params.guestId) {
-    role = "owner";
-  } else {
-    const [member] = await db
-      .select({ role: members.role })
-      .from(members)
-      .where(and(eq(members.boardId, params.boardId), eq(members.userId, params.guestId)));
-    if (!member) return "not_found";
-    role = member.role as Role;
-  }
-  if (role !== "owner" && role !== "facilitator") return "forbidden";
-  if (board.phase !== "collect" && params.phase === "collect") return "irreversible_phase";
-
-  const isReveal = board.phase === "collect" && params.phase !== "collect";
-  if (isReveal) {
-    // T-026, ВС-2(б) (H1, docs/spec/simulator.md § 13): запоминаем seq
-    // доски на момент первого ухода из collect — по нему `welcome`
-    // (`ws/gateway.ts`) досылает переподключившемуся гостю то, что было
-    // скрыто от него во время collect. Гонки между SELECT и UPDATE нет:
-    // `setPhase` вызывается внутри `queue.run(boardId, …)` (`ws/gateway.ts`),
-    // той же очереди, что сериализует и `op` — на момент этого запроса
-    // никто другой параллельно не пишет в `ops` этой доски.
-    await db.transaction(async (tx) => {
-      const [maxRow] = await tx
-        .select({ maxSeq: max(ops.seq) })
-        .from(ops)
-        .where(eq(ops.boardId, params.boardId));
-      await tx
-        .update(boards)
-        .set({ phase: params.phase, revealSeq: maxRow?.maxSeq ?? 0 })
-        .where(eq(boards.id, params.boardId));
-    });
-  } else {
-    await db.update(boards).set({ phase: params.phase }).where(eq(boards.id, params.boardId));
-  }
-  return "ok";
 }
 
 export type GrantFacilitatorResult = "ok" | "not_owner" | "target_not_member";
@@ -290,66 +226,6 @@ export async function grantFacilitator(
     .update(members)
     .set({ role: "facilitator" })
     .where(and(eq(members.boardId, params.boardId), eq(members.userId, params.targetGuestId)));
-
-  return "ok";
-}
-
-export interface BoardVoteSettings {
-  readonly phase: Phase;
-  readonly voteLimit: number;
-}
-
-/**
- * Фаза и лимит голосов доски одним запросом — оба нужны `ws/gateway.ts` для
- * V7 (`ops/votes.ts` `checkVotePermission`/`checkVoteLimit`) на каждый
- * `vote`/`unvote`. `null` — доска не существует/удалена.
- */
-export async function getBoardVoteSettings(
-  db: Db,
-  boardId: string,
-): Promise<BoardVoteSettings | null> {
-  const [board] = await db
-    .select({ phase: boards.phase, settings: boards.settings })
-    .from(boards)
-    .where(and(eq(boards.id, boardId), isNull(boards.deletedAt)));
-  if (!board) return null;
-  return { phase: board.phase as Phase, voteLimit: board.settings.voteLimit };
-}
-
-export type ResetVotesResult = "ok" | "forbidden" | "not_found";
-
-export interface ResetVotesParams {
-  readonly boardId: string;
-  readonly guestId: string;
-}
-
-/**
- * REQ-016. Проверяет только роль (owner/facilitator) — сам массовый отзыв
- * голосов реализуется как по одному `unvote` на активный голос (REQ-016,
- * «не отдельная примитивная операция CRDT»), а для этого нужны и состояние
- * доски (`replayFromSnapshot`), и `BoardHub` для рассылки каждого `unvote`
- * как обычного `op` — недоступны на уровне `boards/service.ts` (только
- * `db`), поэтому сам отзыв делает `ws/gateway.ts` после `"ok"` отсюда.
- */
-export async function resetVotes(db: Db, params: ResetVotesParams): Promise<ResetVotesResult> {
-  const [board] = await db
-    .select({ ownerId: boards.ownerId })
-    .from(boards)
-    .where(and(eq(boards.id, params.boardId), isNull(boards.deletedAt)));
-  if (!board) return "not_found";
-
-  let role: Role;
-  if (board.ownerId === params.guestId) {
-    role = "owner";
-  } else {
-    const [member] = await db
-      .select({ role: members.role })
-      .from(members)
-      .where(and(eq(members.boardId, params.boardId), eq(members.userId, params.guestId)));
-    if (!member) return "not_found";
-    role = member.role as Role;
-  }
-  if (role !== "owner" && role !== "facilitator") return "forbidden";
 
   return "ok";
 }

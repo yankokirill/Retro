@@ -1,7 +1,7 @@
 // T-011 — права и фазы для операций CRDT над стикерами/action item (V6,
 // docs/spec/consistency-model.md § 7; матрица — CLAUDE.md § 5,
 // docs/security/permissions.md). Права на смену фазы — отдельно,
-// `boards/service.ts` `setPhase` (это не CRDT-операция).
+// `rules/board.ts` `checkSetPhase` (это не CRDT-операция).
 //
 // Сознательно НЕ гейтится в T-011 (см. REQ, которые задача заявляет —
 // docs/tasks.md): создание/переименование группы (REQ-012), поля action
@@ -9,6 +9,9 @@
 // операции проходят `classifyAction` → `null` → пропускаются без проверки
 // прав — не потому что всем можно, а потому что правило ещё не назначено
 // ни одной задаче.
+//
+// T-024: переехала из apps/server/src/ops/permissions.ts (реэкспорт там
+// остаётся) без изменения поведения.
 
 import type { State, WireDelta } from "@retro/crdt";
 import { entityKind } from "@retro/crdt";

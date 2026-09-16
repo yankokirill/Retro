@@ -9,5 +9,9 @@
   },
   "include": ["src"],
   "exclude": ["src/**/*.test.ts"],
-  "references": [{ "path": "../../packages/crdt" }, { "path": "../../packages/protocol" }]
+  "references": [
+    { "path": "../../packages/crdt" },
+    { "path": "../../packages/protocol" },
+    { "path": "../../packages/server-core" }
+  ]
 }

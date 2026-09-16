@@ -1,0 +1,19 @@
+{
+  "name": "@retro/server-core",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -b",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@retro/crdt": "*",
+    "@retro/protocol": "*"
+  },
+  "devDependencies": {
+    "vitest": "5.0.0"
+  }
+}
