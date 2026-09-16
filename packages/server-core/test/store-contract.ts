@@ -138,13 +138,25 @@ class World {
   }
 }
 
+// boardId/ownerId/guestId — здесь именно валидные UUID-строки, в отличие от
+// `actor` (`ops.actor` — `text`, намеренно непрозрачный формат, CLAUDE.md
+// правило 7, db/schema.ts JSDoc `ops`). `PgBoardStore` хранит их в колонках
+// `uuid` (`boards.id`/`owner_id`, `members.user_id`, `authors.guest_id`) —
+// нечитаемый Postgres формат-каст `board.id: "board-1"` уронил бы адаптер
+// ошибкой типа данных, а не вернул бы `null`/пустой результат, как ожидает
+// контракт ниже.
 const BOARD = {
-  id: "board-1",
+  id: "00000000-0000-4000-8000-000000000001",
   title: "Retro",
-  ownerId: "owner-1",
+  ownerId: "00000000-0000-4000-8000-0000000000f0",
   phase: "collect" as Phase,
   voteLimit: 3,
 };
+
+const UNKNOWN_BOARD_ID = "00000000-0000-4000-8000-0000000000ff";
+const UNKNOWN_GUEST_ID = "00000000-0000-4000-8000-0000000000fe";
+const GUEST_1 = "00000000-0000-4000-8000-000000000011";
+const GUEST_2 = "00000000-0000-4000-8000-000000000012";
 
 export function describeBoardStoreContract(
   name: string,
@@ -156,7 +168,7 @@ export function describeBoardStoreContract(
   describe(name, () => {
     it("SIM-03: board() — null для неизвестной доски, иначе запись с текущими полями", async () => {
       const store = await freshStore();
-      expect(await store.board("unknown-board")).toBeNull();
+      expect(await store.board(UNKNOWN_BOARD_ID)).toBeNull();
 
       await setup.createBoard(store, BOARD);
       const record = await store.board(BOARD.id);
@@ -183,10 +195,10 @@ export function describeBoardStoreContract(
     it("SIM-03: memberRole — null для неизвестного участника, иначе его роль", async () => {
       const store = await freshStore();
       await setup.createBoard(store, BOARD);
-      expect(await store.memberRole(BOARD.id, "unknown-guest")).toBeNull();
+      expect(await store.memberRole(BOARD.id, UNKNOWN_GUEST_ID)).toBeNull();
 
-      await setup.addMember(store, BOARD.id, "guest-1", "facilitator");
-      expect(await store.memberRole(BOARD.id, "guest-1")).toBe("facilitator");
+      await setup.addMember(store, BOARD.id, GUEST_1, "facilitator");
+      expect(await store.memberRole(BOARD.id, GUEST_1)).toBe("facilitator");
     });
 
     it("SIM-03: appendOp идемпотентен по (board, actor, counter) — повтор той же операции не создаёт вторую строку журнала", async () => {
@@ -406,7 +418,7 @@ export function describeBoardStoreContract(
     it("SIM-03: transaction атомарна — сбой внутри не оставляет ни строки журнала, ни автора", async () => {
       const store = await freshStore();
       await setup.createBoard(store, BOARD);
-      await setup.addMember(store, BOARD.id, "guest-1", "participant", "Alice");
+      await setup.addMember(store, BOARD.id, GUEST_1, "participant", "Alice");
       const world = new World();
       const sticker = world.createSticker("actor-a");
       const entityId = dotKey(sticker.dot);
@@ -415,7 +427,7 @@ export function describeBoardStoreContract(
       await expect(
         store.transaction(async (tx) => {
           await tx.appendOp(params);
-          await tx.recordAuthor(BOARD.id, entityId, "guest-1");
+          await tx.recordAuthor(BOARD.id, entityId, GUEST_1);
           throw new Error("boom");
         }),
       ).rejects.toThrow("boom");
@@ -431,7 +443,7 @@ export function describeBoardStoreContract(
     it("SIM-03: успешная transaction фиксирует все свои appendOp и recordAuthor целиком", async () => {
       const store = await freshStore();
       await setup.createBoard(store, BOARD);
-      await setup.addMember(store, BOARD.id, "guest-1", "participant", "Alice");
+      await setup.addMember(store, BOARD.id, GUEST_1, "participant", "Alice");
       const world = new World();
       const sticker = world.createSticker("actor-a");
       const entityId = dotKey(sticker.dot);
@@ -439,7 +451,7 @@ export function describeBoardStoreContract(
 
       const result = await store.transaction(async (tx) => {
         const appended = await tx.appendOp(paramsFor(BOARD.id, sticker));
-        await tx.recordAuthor(BOARD.id, entityId, "guest-1");
+        await tx.recordAuthor(BOARD.id, entityId, GUEST_1);
         await tx.appendOp(paramsFor(BOARD.id, edit));
         return appended;
       });
@@ -447,7 +459,7 @@ export function describeBoardStoreContract(
       expect(result.seq).toBeGreaterThan(0);
       expect(await store.opsSince(BOARD.id, 0)).toHaveLength(2);
       const authors = await store.authors(BOARD.id);
-      expect(authors.get(entityId)).toBe("guest-1");
+      expect(authors.get(entityId)).toBe(GUEST_1);
       const names = await store.authorDisplayNames(BOARD.id);
       expect(names[entityId]).toBe("Alice");
     });
@@ -458,16 +470,16 @@ export function describeBoardStoreContract(
     it("SIM-03: recordAuthor виден через authors()/authorDisplayNames() после фиксации", async () => {
       const store = await freshStore();
       await setup.createBoard(store, BOARD);
-      await setup.addMember(store, BOARD.id, "guest-2", "owner", "Bob");
+      await setup.addMember(store, BOARD.id, GUEST_2, "owner", "Bob");
       const world = new World();
       const sticker = world.createSticker("actor-a");
       const entityId = dotKey(sticker.dot);
 
       await appendOp(store, paramsFor(BOARD.id, sticker));
-      await recordAuthor(store, BOARD.id, entityId, "guest-2");
+      await recordAuthor(store, BOARD.id, entityId, GUEST_2);
 
       const authors = await store.authors(BOARD.id);
-      expect(authors.get(entityId)).toBe("guest-2");
+      expect(authors.get(entityId)).toBe(GUEST_2);
       const names = await store.authorDisplayNames(BOARD.id);
       expect(names[entityId]).toBe("Bob");
     });
