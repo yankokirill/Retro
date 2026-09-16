@@ -369,40 +369,35 @@ describe("SIM-05: атомарность шага сервера (createBoardSer
       server.open(conn, BOARD_ID);
       await drainUntilSettled(server.receive(conn, helloRaw(actorId, guestId)), pending);
 
-      let opSettled = false;
-      let closeSettled = false;
+      // Порядок фиксируется через сами промисы (happens-before по цепочке
+      // очереди доски), не через "не успело ли ещё" на границе одного
+      // flushMicrotasks(): close() встаёt в очередь ПОСЛЕ op строго на
+      // уровне queue.ts (тот же tail), поэтому closePromise логически не
+      // может разрешиться раньше opPromise, сколько бы микрозадач это ни
+      // заняло. Наблюдаем это напрямую — порядком записи в settleOrder — а
+      // не таймингом отдельного раунда flushMicrotasks: реализация close()
+      // не обращается к store вовсе (registry.unsubscribe синхронна), и
+      // готова settle-иться в тот же раунд, что и op, — булев флаг "ещё не
+      // settled" в конкретный момент опроса это не различает, а порядок
+      // самих `.then()`, сцепленных с общим tail очереди, различает всегда.
+      const settleOrder: string[] = [];
       // Без await между вызовами — close ставится в очередь ПОСЛЕ op по
       // порядку вызова (ADR-0009), не должен обработаться раньше него.
       const opPromise = server.receive(conn, opRaw(actorId));
       opPromise.then(
-        () => {
-          opSettled = true;
-        },
-        () => {
-          opSettled = true;
-        },
+        () => settleOrder.push("op"),
+        () => settleOrder.push("op"),
       );
       const closePromise = server.close(conn);
       closePromise.then(
-        () => {
-          closeSettled = true;
-        },
-        () => {
-          closeSettled = true;
-        },
+        () => settleOrder.push("close"),
+        () => settleOrder.push("close"),
       );
 
-      await flushMicrotasks();
-      // op ещё висит на обращении к хранилищу — close, поставленный позже
-      // op в очередь той же доски/соединения, не мог его обогнать.
-      expect(closeSettled).toBe(false);
-
       await drainUntilSettled(opPromise, pending);
-      expect(opSettled).toBe(true);
-      expect(closeSettled).toBe(false);
-
       await drainUntilSettled(closePromise, pending);
-      expect(closeSettled).toBe(true);
+
+      expect(settleOrder).toEqual(["op", "close"]);
     },
   );
 
