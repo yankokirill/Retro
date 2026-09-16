@@ -31,7 +31,7 @@ import {
 import type { Phase, Role } from "@retro/protocol";
 import { operationDot, operationLamport } from "@retro/protocol";
 import { describe, expect, it } from "vitest";
-import type { AppendOpParams, AppendOpResult, BoardStore, SnapshotRecord } from "../src/store.js";
+import type { AppendOpParams, AppendOpResult, BoardStore, OpRow } from "../src/store.js";
 
 /**
  * Форма подготовки хранилища ДО проверки — вне интерфейса `BoardStore`:
@@ -43,7 +43,12 @@ import type { AppendOpParams, AppendOpResult, BoardStore, SnapshotRecord } from 
  * необязательный параметр, реализация вправе его игнорировать.
  * `saveSnapshot` — необязателен: адаптер, умеющий сохранять снапшоты
  * (E8, `docs/spec/simulator.md` § 4.2), должен его передать, чтобы
- * «снапшот и хвост» проверялись не только «снапшотов не было».
+ * «снапшот и хвост» проверялись не только «снапшотов не было». Сигнатура
+ * `(store, boardId) => Promise<void>` (без `SnapshotRecord`-аргумента,
+ * T-025 design § 3.4 уточнение 3): «снапшот текущего состояния доски на
+ * её текущем `seq`» — это то, что реально делает E8
+ * (`docs/spec/simulator.md` § 4.2: «хранилище сохраняет `compact(X_S)` на
+ * текущем `seq`»), а не «сохрани вот этот произвольный `SnapshotRecord`».
  */
 export interface BoardStoreContractSetup {
   createBoard(
@@ -57,7 +62,7 @@ export interface BoardStoreContractSetup {
     role: Role,
     displayName?: string,
   ): Promise<void>;
-  saveSnapshot?(store: BoardStore, boardId: string, snapshot: SnapshotRecord): Promise<void>;
+  saveSnapshot?(store: BoardStore, boardId: string): Promise<void>;
 }
 
 /** `appendOp`/`recordAuthor` — только через `BoardStoreTx` (`transaction`). */
@@ -372,20 +377,22 @@ export function describeBoardStoreContract(
         await setup.createBoard(store, BOARD);
         const world = new World();
 
+        // «Снапшот текущего состояния доски на её текущем seq» (E8): сначала
+        // доводим состояние до нужной точки через appendOp, ЗАТЕМ снимаем
+        // снапшот — setup.saveSnapshot больше не принимает готовый
+        // SnapshotRecord, он снимает его с того, что уже в хранилище.
         const sticker = world.createSticker("actor-a", "first");
-        const afterFirst = await appendOp(store, paramsFor(BOARD.id, sticker));
-        const stateAtSnapshot = world.state;
+        await appendOp(store, paramsFor(BOARD.id, sticker));
 
-        await setup.saveSnapshot?.(store, BOARD.id, {
-          uptoSeq: afterFirst.seq,
-          state: stateAtSnapshot,
-        });
+        await setup.saveSnapshot?.(store, BOARD.id);
+        const uptoSeqAtSnapshot = await store.lastSeq(BOARD.id);
 
         const edit = world.editText("actor-b", dotKey(sticker.dot), "second");
         await appendOp(store, paramsFor(BOARD.id, edit));
 
         const snapshot = await store.latestSnapshot(BOARD.id);
         if (snapshot === null) throw new Error("expected a snapshot to be present");
+        expect(snapshot.uptoSeq).toBe(uptoSeqAtSnapshot);
 
         const tail = await store.opsSince(BOARD.id, snapshot.uptoSeq);
         let merged = snapshot.state;
@@ -482,6 +489,78 @@ export function describeBoardStoreContract(
       expect(authors.get(entityId)).toBe(GUEST_2);
       const names = await store.authorDisplayNames(BOARD.id);
       expect(names[entityId]).toBe("Bob");
+    });
+
+    // T-025 design § 3.4 уточнение 3: "authorOf/recordAuthor — первый
+    // писатель побеждает (onConflictDoNothing в Postgres)" — расхождение с
+    // Postgres, которое обязано быть в общем контракте, не только в
+    // memory-store.test.ts.
+    it("SIM-03: recordAuthor — первый писатель побеждает, повтор другим guestId автора не меняет", async () => {
+      const store = await freshStore();
+      await setup.createBoard(store, BOARD);
+      await setup.addMember(store, BOARD.id, GUEST_1, "participant", "Alice");
+      await setup.addMember(store, BOARD.id, GUEST_2, "participant", "Bob");
+      const world = new World();
+      const sticker = world.createSticker("actor-a");
+      const entityId = dotKey(sticker.dot);
+      await appendOp(store, paramsFor(BOARD.id, sticker));
+
+      await recordAuthor(store, BOARD.id, entityId, GUEST_1);
+      await recordAuthor(store, BOARD.id, entityId, GUEST_2);
+
+      const authors = await store.authors(BOARD.id);
+      expect(authors.get(entityId)).toBe(GUEST_1);
+      const names = await store.authorDisplayNames(BOARD.id);
+      expect(names[entityId]).toBe("Alice");
+    });
+
+    // T-025 design § 3.4 уточнение 3: "authorDisplayNames не включает
+    // авторов без записи в участниках (inner join)" — расхождение с
+    // Postgres в общем контракте.
+    it("SIM-03: authorDisplayNames не включает сущность, автор которой не добавлен в участники", async () => {
+      const store = await freshStore();
+      await setup.createBoard(store, BOARD);
+      // Намеренно НЕ вызываем setup.addMember для UNKNOWN_GUEST_ID.
+      const world = new World();
+      const sticker = world.createSticker("actor-a");
+      const entityId = dotKey(sticker.dot);
+      await appendOp(store, paramsFor(BOARD.id, sticker));
+      await recordAuthor(store, BOARD.id, entityId, UNKNOWN_GUEST_ID);
+
+      const authors = await store.authors(BOARD.id);
+      expect(authors.get(entityId)).toBe(UNKNOWN_GUEST_ID);
+
+      const names = await store.authorDisplayNames(BOARD.id);
+      expect(names[entityId]).toBeUndefined();
+    });
+
+    // T-025 design § 3.4 уточнение 3: неизменяемость хранилища при
+    // мутации возвращённых выборок — вызывающая сторона получает
+    // независимую копию, а не ссылку на внутреннее состояние адаптера.
+    it("SIM-03: мутация выборок, возвращённых opsSince()/authors(), не меняет хранилище", async () => {
+      const store = await freshStore();
+      await setup.createBoard(store, BOARD);
+      await setup.addMember(store, BOARD.id, GUEST_1, "participant", "Alice");
+      const world = new World();
+      const sticker = world.createSticker("actor-a");
+      const entityId = dotKey(sticker.dot);
+      await appendOp(store, paramsFor(BOARD.id, sticker));
+      await recordAuthor(store, BOARD.id, entityId, GUEST_1);
+
+      const rows = await store.opsSince(BOARD.id, 0);
+      expect(rows).toHaveLength(1);
+      (rows as OpRow[]).push({ seq: 999_999, delta: paramsFor(BOARD.id, sticker).delta });
+
+      const rowsAgain = await store.opsSince(BOARD.id, 0);
+      expect(rowsAgain).toHaveLength(1);
+
+      const authors = await store.authors(BOARD.id);
+      expect(authors.size).toBe(1);
+      (authors as Map<EntityId, string>).set("intruder:1", GUEST_1);
+
+      const authorsAgain = await store.authors(BOARD.id);
+      expect(authorsAgain.size).toBe(1);
+      expect(authorsAgain.has("intruder:1")).toBe(false);
     });
   });
 }

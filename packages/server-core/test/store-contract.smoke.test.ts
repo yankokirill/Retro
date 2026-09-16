@@ -216,7 +216,10 @@ class ReferenceBoardStore implements BoardStore {
     this.nextSeq = seqCursor;
     for (const { boardId, entityId, guestId } of pendingAuthors) {
       const map = this.authorsByBoard.get(boardId) ?? new Map<EntityId, string>();
-      map.set(entityId, guestId);
+      // First-writer-wins (SIM-03: расхождение с Postgres из T-025 design
+      // § 3.4 — `onConflictDoNothing` там же): повторная запись автора той
+      // же сущности не переписывает уже зафиксированного автора.
+      if (!map.has(entityId)) map.set(entityId, guestId);
       this.authorsByBoard.set(boardId, map);
     }
     return result;
@@ -249,6 +252,15 @@ class ReferenceBoardStore implements BoardStore {
   seedSnapshot(boardId: string, snapshot: SnapshotRecord): void {
     this.snapshots.set(boardId, snapshot);
   }
+
+  // Новая сигнатура `BoardStoreContractSetup.saveSnapshot` (T-025 design
+  // § 3.4 уточнение 3) не приносит готовый `SnapshotRecord` — она снимает
+  // снапшот с того, что уже накоплено в хранилище, на его текущем `seq`.
+  async saveSnapshot(boardId: string): Promise<void> {
+    const { state } = await this.currentState(boardId);
+    const uptoSeq = await this.lastSeq(boardId);
+    this.seedSnapshot(boardId, { uptoSeq, state });
+  }
 }
 
 const setup: BoardStoreContractSetup = {
@@ -258,8 +270,8 @@ const setup: BoardStoreContractSetup = {
   async addMember(store, boardId, guestId, role, displayName) {
     (store as ReferenceBoardStore).seedMember(boardId, guestId, role, displayName);
   },
-  async saveSnapshot(store, boardId, snapshot) {
-    (store as ReferenceBoardStore).seedSnapshot(boardId, snapshot);
+  async saveSnapshot(store, boardId) {
+    await (store as ReferenceBoardStore).saveSnapshot(boardId);
   },
 };
 

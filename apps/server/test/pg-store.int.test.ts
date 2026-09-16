@@ -68,11 +68,18 @@ const setup: BoardStoreContractSetup = {
   async addMember(_store, boardId, guestId, role: Role, displayName = "Guest") {
     await db.insert(members).values({ boardId, userId: guestId, role, displayName });
   },
-  async saveSnapshot(_store, boardId, snapshot) {
-    // Существующая saveSnapshot компактит state перед записью (ops/log.ts) —
-    // безопасно для контракта: materialize инвариантен к компактизации (I5),
-    // сравнения в store-contract.ts идут через materialize, не побитово.
-    await saveSnapshotRow(db, boardId, snapshot.uptoSeq, snapshot.state);
+  async saveSnapshot(store, boardId) {
+    // T-025: BoardStoreContractSetup.saveSnapshot больше не принимает
+    // готовый SnapshotRecord — снимает снапшот с того, что уже накоплено
+    // в хранилище, на его текущем lastSeq (E8, docs/spec/simulator.md
+    // § 4.2). Существующая saveSnapshotRow компактит state перед записью
+    // (ops/log.ts) — безопасно: materialize инвариантен к компактизации
+    // (I5), сравнения в store-contract.ts идут через materialize.
+    const [{ state }, uptoSeq] = await Promise.all([
+      store.currentState(boardId),
+      store.lastSeq(boardId),
+    ]);
+    await saveSnapshotRow(db, boardId, uptoSeq, state);
   },
 };
 
