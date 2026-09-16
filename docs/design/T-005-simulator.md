@@ -350,7 +350,7 @@ async function runSimulation(config: SimConfig): Promise<RunResult> {
 | `cut` | `alive = false`, каналы очищаются, `client.disconnected()`, `noticePending = true` |
 | `serverNotice` | `await server.close(conn.id)`, `noticePending = false` |
 | `connect` | новое `Connection`, `server.open(id, boardId)`, `client.connected()` → `toServer` |
-| `reload` | `cut` (если было соединение) → новый `createSyncClient` с тем же гостем и тем же `OutboxStore` мира (ВС-1 б); до решения ВС-1 событие разрешено только при `P = ∅` |
+| `reload` | `cut` (если было соединение) → новый `createSyncClient` с тем же гостем, но **новым `actorId`** и новым (пустым) `OutboxStore` — вариант (а) ВС-1 (`simulator.md` § 13; T-005 не реализует ВС-1(б), у `client-core` пока нет чтения очереди); разрешено при любой `P`, её содержимое — в счётчик потерь сводки |
 | `command` | `client.command(cmd)` → `toServer`; ожидаемый `setPhase` фиксируется в оракуле **по `commandResult ok`**, пришедшему клиенту, или по `store.board().phase` после шага, если ответ потерян (фаза — факт хранилища, не логика) |
 | `snapshot` | `store.saveSnapshot(boardId)`; запомнить `upToSeq` для S8 |
 | `storeFault` | `store.failNextTransaction(prng.int(0, 1))`; следующий `error` разрешён S7 |
@@ -379,13 +379,13 @@ interface Oracle {
 | S1 | `wellFormed.addRow(row)`: индекс `cell|dot → canonical(value)` (W1), `lamport|actor → dotKey` (W2), для каждого `supersede` в строке — есть запись этой же строки в ту же ячейку, и `lamport` записи-цели (если известна) меньше (W3), для `created` — записи во всех полях вида с dot = id в этой же строке (W4). Полная проверка в контрольной точке — тот же проход по всему журналу с нуля: сравнивает, что инкрементальный и полный результаты совпадают |
 | S2 | `activeVotes(X_S)` сгруппировать по `user`, ≤ `voteLimit` |
 | S3 | `row = store.log().find(seq)`; для `op`-пендинга — `operationDot(row.delta)` равен; для `unvote` — пара в `row.delta.unvotes`; глобально — индекс `(actor,counter)` без повторов |
-| S4 | `equals(client.inspect().confirmed, oracle.proj(guest, X_S))`; при неравенстве — diff пяти компонент (первые 5 элементов с каждой стороны) |
+| S4 | `equals(compact(client.inspect().confirmed), compact(oracle.proj(guest, X_S)))` (ВС-6, `simulator.md` § 13); при неравенстве — diff пяти компонент (первые 5 элементов с каждой стороны) |
 | S5 | группировка клиентов по `proj`; внутри группы `canonical(materialize)` равны; если фаза ≠ collect — все равны `canonical(materialize(X_S))` |
 | S6 | для каждого `dot` из множества «получен ack» — присутствует в `X_S` |
-| S7 | причина ∈ разрешённого множества; dot отсутствует в журнале; в покое — отсутствует в `confirmed` и `pending` автора |
+| S7 | сопоставленный/устаревший отказ различается по тому, остался ли `dot` в `P` клиента к моменту доставки (ВС-7); причина ∈ разрешённого для этого вида множества; dot отсутствует в журнале (обработка сообщения сервером не добавила строк); в покое — отсутствует в `confirmed` и `pending` автора |
 | S8 | для каждого снапшота: `materialize(merge(snapshot.state, fold(opsSince(upToSeq))))` и `materialize(currentState)` против `materialize(X_S)` |
 | S9 | `drain` возвращает `Violation` при превышении `B` или пустых каналах с непустым `P` |
-| S10 | пока `oracle.phaseAt() === "collect"`: разобранный `op`/`welcome` — ни один элемент не касается стикера с `stickerAuthor ≠ guest получателя` |
+| S10 | по фазе **в момент отправки сервером** (записывается вместе с исходящим сообщением в `apply.ts`, не берётся заново при доставке): ни один элемент не касается стикера с `stickerAuthor ≠ guest получателя` |
 | S11 | `clientMessageSchema.safeParse` / `serverMessageSchema.safeParse`; `raw.length` (в байтах UTF-8) ≤ 16 KiB только к серверу; максимум по направлениям — в `stats` |
 
 Сравнение `materialize` — через каноническую сериализацию (ключи отсортированы), как `canonical` в `packages/crdt` (не импортируется: внутренняя функция; в `sim` своя на 10 строк).
@@ -465,7 +465,7 @@ generateIntent(world, client, prng):
 
 ## 8. Критерии готовности T-005
 
-1. `npm run sim -- --clients=5 --ops=10000 --seed=1` завершается с кодом 0 и сводкой § 11.1 спецификации. На ветке, где H1 ещё не исправлена, профиль `reveal` падает на S4 (подтверждение гипотезы до T-026 или сразу после — регрессионной трассой).
+1. `npm run sim -- --clients=5 --ops=10000 --seed=1` завершается с кодом 0 и сводкой § 11.1 спецификации. H1 исправлена в T-026 до старта T-005, поэтому вместо демонстрации на живой ветке — один ручной прогон с временно отключённой досылкой по `revealSeq` (локальный откат ВС-2, не коммитится), подтверждающий, что профиль `reveal` падает на S4; результат фиксируется в журнале (§ 8 пункт 5). Постоянная проверка этой регрессии — мутант M6 в T-027, не здесь.
 2. `npm run check` содержит `test:sim` и зелёный, укладывается в бюджет § 11.2.
 3. Тесты с `SIM-01`, `SIM-02`, `SIM-04`, `SIM-05` (в `server-core`), `SIM-06`, `SIM-07`, `SIM-08` (без мутантов — на сконструированных нарушениях), `SIM-09`, `SIM-11` и REQ-022/023/024/025 в именах существуют и зелёные; `check:trace` видит новые REQ у T-005.
 4. Тесты `packages/sim` пишет агент `test-author` по `docs/spec/simulator.md` до реализации оракула и проверок (правило implement-req). Главная сессия пишет мир и планировщик.
