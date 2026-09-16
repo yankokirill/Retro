@@ -265,16 +265,15 @@ export function checkAckedOpsPersist(world: World, step: number): Violation | nu
 
 // ---------------------------------------------------------------------------
 // S7 — при каждой доставке reject/error и в покое: отклонённая операция
-// отсутствует в журнале; причина ограничена множеством, зависящим от того,
-// сопоставленный это отказ (dot ещё в P клиента) или устаревший (dot уже
-// убран каскадом ADR-0010) — ВС-7, docs/spec/simulator.md § 13.
+// отсутствует в журнале; причина ограничена множеством честного генератора
+// — docs/spec/simulator.md § 13 ВС-7/ВС-8.
 // ---------------------------------------------------------------------------
 
 export interface RejectObservation {
   readonly kind: "reject";
   readonly dot: Dot;
   readonly reason: RejectReason | "irreversible_phase";
-  /** Оставался ли этот dot в P клиента непосредственно перед обработкой ответа. */
+  /** Оставался ли этот dot в P клиента непосредственно перед обработкой ответа — для сводки/покрытия (SIM-11), не сужает допустимые причины (ВС-8). */
   readonly wasPending: boolean;
   /** Добавила ли обработка этого сообщения сервером хоть одну строку в журнал (должно быть false). */
   readonly logGrew: boolean;
@@ -286,20 +285,33 @@ export interface ErrorObservation {
   readonly afterStoreFault: boolean;
 }
 
-/** ВС-7: причины, допустимые у сопоставленного отказа (dot ещё в P на момент доставки). */
-const MATCHED_ALLOWED_REASONS: ReadonlySet<string> = new Set([
+/**
+ * ВС-7 / ВС-8 (docs/spec/simulator.md § 13, H7 — найдена и разобрана при
+ * реализации T-005, 2026-09-16): одно множество причин для сопоставленного
+ * И устаревшего отказа. Изначально ожидалось, что причина зависит от того,
+ * убрал ли клиент dot из P сам (ADR-0010) или ещё нет — но честный клиент
+ * может ПОВТОРНО отправить один и тот же dot после нескольких циклов
+ * разрыв→переподключение, если первый ответ на него так и не дошёл (потерян
+ * при более раннем разрыве, § 4.3). Каждая копия получает от сервера СВОЙ
+ * независимый ответ (findOpSeq никогда не находит непринятый dot); первая
+ * ДОСТАВЛЕННАЯ копия убирает dot из P, все следующие дубликаты приходят уже
+ * на устаревший — с той же причиной, какую дал бы сопоставленный отказ.
+ * Различить «устарел из-за ADR-0010» от «устарел из-за дубликата» по одному
+ * этому наблюдению нельзя, поэтому оба случая делят одно множество причин;
+ * `unjustified_supersede` — единственная, которая по построению НЕ может
+ * возникнуть у сопоставленного отказа (V4 проверяет её только для delta,
+ * уже отправленной поверх чего-то, что сам клиент видел как принятое) — но
+ * держать её отдельно ради этого не стоит: держать один список проще и
+ * ничего не ослабляет (все причины в нём — легитимные исходы V1–V7).
+ */
+const HONEST_REJECT_REASONS: ReadonlySet<string> = new Set([
   "wrong_phase",
   "vote_limit",
   "unknown_target",
   "not_own_vote",
-  "irreversible_phase",
-]);
-
-/** ВС-7 / ADR-0010: причины, которые может нести устаревший отказ — dot, зависимость от которого клиент уже разорвал сам. */
-const STALE_ALLOWED_REASONS: ReadonlySet<string> = new Set([
+  "stale_dot",
   "unjustified_supersede",
-  "unknown_target",
-  "not_own_vote",
+  "irreversible_phase",
 ]);
 
 export function checkReject(
@@ -319,12 +331,11 @@ export function checkReject(
       `обработка сообщения об отказе (dot ${dotKey(observation.dot)}) добавила строку в журнал`,
     );
   }
-  const allowed = observation.wasPending ? MATCHED_ALLOWED_REASONS : STALE_ALLOWED_REASONS;
-  if (!allowed.has(observation.reason)) {
+  if (!HONEST_REJECT_REASONS.has(observation.reason)) {
     return violation(
       "S7",
       step,
-      `причина "${observation.reason}" недопустима для ${observation.wasPending ? "сопоставленного" : "устаревшего"} отказа (dot ${dotKey(observation.dot)})`,
+      `причина "${observation.reason}" недопустима для честного клиента (dot ${dotKey(observation.dot)}, wasPending=${observation.wasPending})`,
     );
   }
   return null;

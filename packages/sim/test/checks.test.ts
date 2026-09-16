@@ -602,12 +602,31 @@ describe("SIM-08 / S7: checkReject", () => {
     expect(checkReject(world, observation, 1)).toBeNull();
   });
 
-  it("SIM-08 / S7: сопоставленный отказ с запрещённой причиной (stale_dot) — нарушение", () => {
+  it("SIM-08 / S7 (ВС-8, H7): сопоставленный отказ с stale_dot — нет нарушения", () => {
+    // H7 (T-005, разобрана 2026-09-16): честный клиент получает stale_dot на
+    // dot, ещё лежащий в P, если ЕГО ЖЕ предыдущий отказ (обычно wrong_phase)
+    // был потерян при разрыве до доставки (§ 4.3), а пока клиент был офлайн,
+    // другие операции того же актора продвинули счётчик выше этого dot —
+    // при пересылке всей P после реконнекта V1 (stale_dot) отклоняет его
+    // раньше, чем V6 успел бы снова дать исходную причину. docs/spec/
+    // simulator.md § 13 ВС-8.
     const world = minimalWorld();
     const observation: RejectObservation = {
       kind: "reject",
       dot: someDot,
-      reason: "stale_dot" as RejectReason,
+      reason: "stale_dot",
+      wasPending: true,
+      logGrew: false,
+    };
+    expect(checkReject(world, observation, 1)).toBeNull();
+  });
+
+  it("SIM-08 / S7: сопоставленный отказ с запрещённой причиной (invalid_stamp) — нарушение", () => {
+    const world = minimalWorld();
+    const observation: RejectObservation = {
+      kind: "reject",
+      dot: someDot,
+      reason: "invalid_stamp" as RejectReason,
       wasPending: true,
       logGrew: false,
     };
@@ -628,7 +647,12 @@ describe("SIM-08 / S7: checkReject", () => {
     expect(checkReject(world, observation, 1)).toBeNull();
   });
 
-  it("SIM-08 / S7 (ADR-0010): устаревший отказ с причиной вне тройки (wrong_phase) — нарушение", () => {
+  it("SIM-08 / S7 (ВС-8, H7): устаревший отказ с wrong_phase (дубликат — сервер мог дать её и на первую, и на повторную попытку) — нет нарушения", () => {
+    // H7: разделение множества причин по сопоставленный/устаревший снято —
+    // честный дубликат одного и того же dot, отправленный повторно после
+    // потери первого ответа, может прийти как устаревший с ЛЮБОЙ причиной
+    // из общего множества, не только с тройкой ADR-0010. docs/spec/
+    // simulator.md § 13 ВС-8.
     const world = minimalWorld();
     const observation: RejectObservation = {
       kind: "reject",
@@ -637,9 +661,38 @@ describe("SIM-08 / S7: checkReject", () => {
       wasPending: false,
       logGrew: false,
     };
+    expect(checkReject(world, observation, 1)).toBeNull();
+  });
+
+  it("SIM-08 / S7: устаревший отказ с запрещённой причиной (invalid_stamp) — нарушение", () => {
+    const world = minimalWorld();
+    const observation: RejectObservation = {
+      kind: "reject",
+      dot: someDot,
+      reason: "invalid_stamp" as RejectReason,
+      wasPending: false,
+      logGrew: false,
+    };
     const violation = checkReject(world, observation, 1);
     expect(violation).not.toBeNull();
     expect(violation?.property).toBe("S7");
+  });
+
+  it("SIM-08 / S7 (ВС-8, H7): устаревший отказ с stale_dot (дубликат на уже убранный dot) — нет нарушения", () => {
+    // Продолжение H7: тот же dot мог пережить несколько циклов разрыв→
+    // переподключение до первого ответа — каждая копия независимо получает
+    // stale_dot от сервера (findOpSeq никогда его не находит), первая
+    // доставленная убирает dot из P, следующие дубликаты приходят уже на
+    // устаревший dot. docs/spec/simulator.md § 13 ВС-8.
+    const world = minimalWorld();
+    const observation: RejectObservation = {
+      kind: "reject",
+      dot: someDot,
+      reason: "stale_dot",
+      wasPending: false,
+      logGrew: false,
+    };
+    expect(checkReject(world, observation, 1)).toBeNull();
   });
 
   it("SIM-08 / S7: logGrew=true — нарушение независимо от причины", () => {
