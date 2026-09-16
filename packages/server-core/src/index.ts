@@ -10,6 +10,8 @@ export type {
   ServerCorePorts,
 } from "./board-server.js";
 export { createBoardServer } from "./board-server.js";
+export type { MemoryBoardStore, MemoryBoardStoreOptions } from "./memory-store.js";
+export { createMemoryBoardStore } from "./memory-store.js";
 export { type BoardQueue, createBoardQueue } from "./queue.js";
 export type { ResetVotesCheckResult, SetPhaseCheckResult } from "./rules/board.js";
 export { checkResetVotes, checkSetPhase, resolveRole } from "./rules/board.js";
