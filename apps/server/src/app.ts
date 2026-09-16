@@ -13,7 +13,6 @@ import Fastify, { type FastifyInstance } from "fastify";
 import fp from "fastify-plugin";
 import type { Db } from "./boards/service.js";
 import * as boardsService from "./boards/service.js";
-import { BoardHub } from "./ws/board-hub.js";
 import { registerBoardWebSocket } from "./ws/gateway.js";
 
 export interface AppDeps {
@@ -159,7 +158,7 @@ export function buildApp(deps: AppDeps = {}): FastifyInstance {
     app.register(
       fp(async (instance) => {
         await instance.register(websocketPlugin);
-        registerBoardWebSocket(instance, { db, hub: new BoardHub(), voterTokenSecret });
+        registerBoardWebSocket(instance, { db, voterTokenSecret });
       }),
     );
   }
