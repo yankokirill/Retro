@@ -221,10 +221,14 @@
 ### T-025: `MemoryBoardStore`
 
 - **REQ:** infra
-- **Статус:** todo
+- **Статус:** in-progress — ветка `feat/T-025-memory-store`
 - **Размер:** S
 - **Зависит от:** T-024
 - **Затрагивает:** packages/server-core
+- **Уточнения к `docs/design/T-005-simulator.md` § 3.4 (2026-09-16, при реализации):**
+  1. `currentState` — `compact(снапшот) ⊔ хвост`, как в `PgBoardStore` (`replayFromSnapshot`), не инкрементальный `merge` с начала журнала — иначе поведение сразу после `saveSnapshot`/E8 в памяти и на Postgres расходится в точности там, где расхождение важнее всего;
+  2. `failNextTransaction(afterWrites)` (E9): бросает `(afterWrites+1)`-я запись в транзакции; если записей меньше — бросает при фиксации, не применив ничего; неисправность одноразовая; `seq` упавшей транзакции не переиспользуются;
+  3. в `store-contract.ts` (SIM-03 кр. 2) добавляются три пункта: first-writer-wins у `recordAuthor`, `authorDisplayNames` без участника не включает автора, неизменяемость хранилища при мутации выборок; `BoardStoreContractSetup.saveSnapshot` упрощён до `(store, boardId) => Promise<void>` («снапшот текущего состояния на `lastSeq`», как E8), `pg-store.int.test.ts`/`smoke.test.ts` подстроены
 - **Готово, когда:** тот же контрактный набор `BoardStore` зелёный на адаптере в памяти (SIM-03); `failNextTransaction`, `seqGap`, `saveSnapshot`, `log`; тесты ядра сервера на нём
 
 ### T-020: Экспорт итогов
