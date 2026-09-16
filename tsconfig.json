@@ -5,6 +5,7 @@
     { "path": "packages/crdt" },
     { "path": "packages/client-core" },
     { "path": "packages/server-core" },
+    { "path": "packages/sim" },
     { "path": "apps/server" },
     { "path": "apps/web" }
   ]
