@@ -5,8 +5,8 @@
 // ни `replayTrace`, ни минимизации.
 
 import type { Profile } from "./config.js";
-import type { Event } from "./events.js";
 import { TRACE_VERSION } from "./config.js";
+import type { Event } from "./events.js";
 
 export interface TraceConfig {
   readonly clients: number;

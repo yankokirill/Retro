@@ -11,12 +11,12 @@ import { dirname } from "node:path";
 import { parseArgs } from "node:util";
 import {
   buildConfig,
+  type ConfigInput,
   DEFAULT_CHECKPOINT_MAX,
   DEFAULT_CHECKPOINT_MIN,
   DEFAULT_CLIENTS,
   DEFAULT_OPS,
   DEFAULT_PROFILE_NAME,
-  type ConfigInput,
   type Profile,
 } from "./config.js";
 import { runSimulation } from "./run.js";

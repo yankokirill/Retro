@@ -707,20 +707,21 @@ describe("SIM-08 / S7: checkNoRejectedResidue — в покое dot из rejecti
   it("SIM-08 / S7: клиент-мутант держит confirmed запись отклонённого dot — нарушение", () => {
     const store = makeStoreWithBoard();
     const server = makeServer(store);
-    const rejectedDot: Dot = { actor: ACTOR_OWNER, counter: 1 };
 
-    const residueState: State = merge(empty(), {
-      created: new Map([
-        [
-          JSON.stringify([`${ACTOR_OWNER}:1`]),
-          { id: `${ACTOR_OWNER}:1`, kind: "sticker" as const },
-        ],
-      ]),
-      entries: new Map(),
-      supersedes: new Map(),
-      votes: new Map(),
-      unvotes: new Map(),
+    // Настоящий конструктор, а не собранный вручную created-без-entries: W4
+    // (well-formed.ts) требует, чтобы created сопровождался записями во всех
+    // обязательных полях вида — без этого materialize() ниже падает
+    // (findWinner листает entries поля place, которых тут не было), а
+    // фикстура должна быть валидным CRDT-состоянием, невалиден только сам
+    // "мутант" (SyncClient, держащий отклонённый dot), не форма данных.
+    const created = createSticker(empty(), newClock(ACTOR_OWNER), {
+      column: "start",
+      frac: "m",
+      text: "ghost",
+      color: "yellow",
     });
+    const rejectedDot: Dot = created.dot;
+    const residueState: State = merge(empty(), created.delta);
 
     // Минимальный фейковый SyncClient (мутант на границе ядра, § 10.2 —
     // "адаптер подменяет поведение на границе ядра") — единственный

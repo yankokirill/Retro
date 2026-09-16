@@ -9,8 +9,8 @@ import type { Role } from "@retro/protocol";
 import type { BoardServer, MemoryBoardStore } from "@retro/server-core";
 import type { SimConfig } from "./config.js";
 import type { Connection } from "./network.js";
-import type { Prng } from "./prng.js";
 import type { OracleState } from "./oracle.js";
+import type { Prng } from "./prng.js";
 import type { Stats } from "./stats.js";
 
 export interface Guest {

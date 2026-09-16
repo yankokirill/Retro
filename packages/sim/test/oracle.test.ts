@@ -72,14 +72,21 @@ function buildFixture(): Fixture {
   const sticker2 = [...c2.delta.created.values()][0]?.id;
   if (!sticker2) throw new Error("buildFixture: sticker2 missing");
 
-  const g = createGroup(state, newClock("actor-1"), { column: "start", frac: "c", title: "group" });
+  // Продолжаем часы actor-1 (c1.clock), а не newClock("actor-1") заново —
+  // иначе счётчик actor-1 обнулялся бы на каждой операции, и dot группы
+  // совпал бы с dot'ом sticker1 (оба стали бы "actor-1:1", один id на две
+  // разные сущности). Найдено при реализации oracle.ts (2026-09-16): тест
+  // требовал видимости группы и action item независимо от sticker1, но
+  // коллизия id значила, что группа физически подменяла sticker1 в
+  // state.created при merge.
+  const g = createGroup(state, c1.clock, { column: "start", frac: "c", title: "group" });
   state = merge(state, g.delta);
   seq += 1;
   rows.push({ seq, delta: toWire(g.delta) });
   const groupId = [...g.delta.created.values()][0]?.id;
   if (!groupId) throw new Error("buildFixture: groupId missing");
 
-  const a = createAction(state, newClock("actor-1"), { text: "do it" });
+  const a = createAction(state, g.clock, { text: "do it" });
   state = merge(state, a.delta);
   seq += 1;
   rows.push({ seq, delta: toWire(a.delta) });

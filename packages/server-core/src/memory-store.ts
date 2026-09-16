@@ -46,6 +46,19 @@ export interface MemoryBoardStore extends BoardStore {
   failNextTransaction(afterWrites: number): void;
   /** Сырые строки журнала доски, по возрастанию `seq` — для оракула симулятора. */
   log(boardId: string): readonly OpRow[];
+  /**
+   * Синхронный аналог `board()` — только у адаптера в памяти (у Postgres
+   * такого не может быть, поэтому вне порта `BoardStore`). Нужен
+   * `packages/sim`: `checks.ts` объявлен синхронным (S2/S3/S4/... — не
+   * `Promise`, см. `docs/design/T-005-simulator.md` § 5.5), а свойства
+   * доски вроде `voteLimit` не меняются после создания — их можно
+   * прочитать разом с миром, не дожидаясь `await`.
+   */
+  boardSync(boardId: string): BoardRecord | null;
+  /** Синхронный аналог `latestSnapshot()` — тот же повод, что `boardSync` (S8). */
+  latestSnapshotSync(boardId: string): SnapshotRecord | null;
+  /** Синхронный аналог `currentState()` — тот же повод, что `boardSync` (S8). */
+  currentStateSync(boardId: string): ReplayResult;
 }
 
 export interface MemoryBoardStoreOptions {
@@ -223,6 +236,10 @@ class MemoryBoardStoreImpl implements MemoryBoardStore {
   // --- Порт BoardStore: чтение -----------------------------------------
 
   async board(boardId: string): Promise<BoardRecord | null> {
+    return this.boardSync(boardId);
+  }
+
+  boardSync(boardId: string): BoardRecord | null {
     const entry = this.getEntry(boardId);
     if (!entry) return null;
     return { id: boardId, ...entry.record };
@@ -272,6 +289,11 @@ class MemoryBoardStoreImpl implements MemoryBoardStore {
   }
 
   async latestSnapshot(boardId: string): Promise<SnapshotRecord | null> {
+    return this.latestSnapshotSync(boardId);
+  }
+
+  /** Синхронный аналог `latestSnapshot()` — см. `boardSync`, тот же повод (S8, `packages/sim`). */
+  latestSnapshotSync(boardId: string): SnapshotRecord | null {
     return this.getEntry(boardId)?.snapshot ?? null;
   }
 
@@ -282,6 +304,11 @@ class MemoryBoardStoreImpl implements MemoryBoardStore {
    * операций в памяти и на Postgres должно совпадать именно в этой точке.
    */
   async currentState(boardId: string): Promise<ReplayResult> {
+    return this.currentStateSync(boardId);
+  }
+
+  /** Синхронный аналог `currentState()` — см. `boardSync`, тот же повод (S8, `packages/sim`). */
+  currentStateSync(boardId: string): ReplayResult {
     const entry = this.requireEntry(boardId);
     return this.computeCurrentState(entry);
   }
