@@ -3,6 +3,7 @@
 // Пакет чистый: без I/O, Date.now(), Math.random() (CLAUDE.md, правило 7).
 // Валидация размеров и прав — не здесь, а в packages/protocol и на сервере.
 
+import { PersistentMap } from "./persistent-map.js";
 import type {
   ActionView,
   ActorId,
@@ -38,6 +39,92 @@ export type * from "./types.js";
 const identity = (...parts: (string | number)[]): string => JSON.stringify(parts);
 const cellDotIdentity = (key: Key, dot: Dot): string =>
   identity(key.entity, key.field, dot.actor, dot.counter);
+
+// ---------------------------------------------------------------------------
+// Индекс видимых записей по ячейкам.
+//
+// `visible(state, key)` раньше сканировал ВСЕ записи состояния: O(n) на каждую
+// операцию, на каждую цель генератора и на каждый `materialize`. Индекс
+// `ячейка → неперекрытые записи` строится один раз на «линию» состояний и дальше
+// инкрементально переносится через `merge`/`mergeAll` (O(|дельты| · log n)).
+// Он целиком выводится из `entries` и `supersedes`, поэтому это кэш, а не часть
+// состояния: держится в WeakMap и на семантику не влияет (I3).
+
+type CellIndex = PersistentMap<readonly Entry[]>;
+
+const cellKeyOf = (entity: string, field: string): string => `${entity}\u0000${field}`;
+
+const cellIndexCache = new WeakMap<State, CellIndex>();
+
+/** Ниже этого размера индекс лениво строится по первому запросу, а не переносится. */
+const CELL_INDEX_EAGER_SIZE = 64;
+
+function buildCellIndex(state: State): CellIndex {
+  const groups = new Map<string, Entry[]>();
+  for (const entry of state.entries.values()) {
+    if (state.supersedes.has(cellDotIdentity(entry.key, entry.dot))) continue;
+    const cell = cellKeyOf(entry.key.entity, entry.key.field);
+    const list = groups.get(cell);
+    if (list) list.push(entry);
+    else groups.set(cell, [entry]);
+  }
+  return PersistentMap.from(groups);
+}
+
+function cellsOf(state: State): CellIndex {
+  let index = cellIndexCache.get(state);
+  if (!index) {
+    index = buildCellIndex(state);
+    cellIndexCache.set(state, index);
+  }
+  return index;
+}
+
+const sameDot = (a: Dot, b: Dot): boolean => a.actor === b.actor && a.counter === b.counter;
+
+/**
+ * Переносит индекс базового состояния на `result = ⨆ states`: добавляет записи
+ * остальных состояний, ещё не перекрытые в `result`, и убирает записи, перекрытые
+ * их `supersedes`. Ничего не делает, если ни у одного состояния индекса нет и оно
+ * мало (тогда индекс построится по первому запросу). Совпадение идентичности с
+ * иным элементом (нарушение W1) — индекс не переносим: перестроится лениво.
+ */
+function carryCellIndex(result: State, states: readonly State[]): void {
+  let base: State | undefined;
+  for (const state of states) {
+    if (base === undefined || state.entries.size > base.entries.size) base = state;
+  }
+  if (base === undefined) return;
+  let cells = cellIndexCache.get(base);
+  if (!cells) {
+    if (base.entries.size < CELL_INDEX_EAGER_SIZE) return;
+    cells = buildCellIndex(base);
+    cellIndexCache.set(base, cells);
+  }
+  let next: CellIndex = cells;
+  for (const other of states) {
+    if (other === base) continue;
+    for (const [id, entry] of other.entries) {
+      const known = base.entries.get(id);
+      if (known !== undefined) {
+        if (known !== entry && !sameValue(known, entry)) return;
+        continue;
+      }
+      if (result.supersedes.has(cellDotIdentity(entry.key, entry.dot))) continue;
+      const cell = cellKeyOf(entry.key.entity, entry.key.field);
+      next = next.set(cell, [...(next.get(cell) ?? []), entry]);
+    }
+    for (const [id, superseded] of other.supersedes) {
+      if (base.supersedes.has(id)) continue;
+      const cell = cellKeyOf(superseded.key.entity, superseded.key.field);
+      const list = next.get(cell);
+      if (!list) continue;
+      const kept = list.filter((entry) => !sameDot(entry.dot, superseded.dot));
+      if (kept.length !== list.length) next = next.set(cell, kept);
+    }
+  }
+  cellIndexCache.set(result, next);
+}
 
 /** Стабильная сериализация: ключи объектов отсортированы, порядок свойств не влияет. */
 function canonical(value: unknown): string {
@@ -107,42 +194,50 @@ export function newClock(actor: ActorId): Clock {
   return { actor, counter: 0, lamport: 0 };
 }
 
+/** Персистентная версия таблицы: обычный `Map` превращается один раз, `PersistentMap` остаётся как есть. */
+function persistent<T>(map: ReadonlyMap<string, T>): PersistentMap<T> {
+  return map instanceof PersistentMap ? map : PersistentMap.from(map);
+}
+
 /**
  * Объединение множеств. Корректные реплики никогда не порождают два разных элемента
  * с одной идентичностью (W1); если такое всё же пришло, берётся канонически
  * наибольший — так законы полурешётки держатся для любых входов.
+ *
+ * Меньшее множество вливается в большее: результат тот же (правило «побеждает
+ * канонически наибольший» симметрично), а стоимость — O(|меньшего| · log n)
+ * вместо копирования большего. Дубли (b ⊆ a) не создают новых версий вовсе.
  */
 function union<T>(a: ReadonlyMap<string, T>, b: ReadonlyMap<string, T>): ReadonlyMap<string, T> {
   if (b.size === 0) return a;
   if (a.size === 0) return b;
-  // Копия `a` — только при первом реальном изменении: повторная доставка и
-  // дубли (b ⊆ a) не должны стоить O(|a|).
-  let result: Map<string, T> | null = null;
-  for (const [id, element] of b) {
-    const existing = (result ?? a).get(id);
+  const [big, small] = a.size >= b.size ? [a, b] : [b, a];
+  let result: PersistentMap<T> | null = null;
+  for (const [id, element] of small) {
+    const existing = (result ?? big).get(id);
     if (existing === undefined || replaces(existing, element)) {
-      result ??= new Map(a);
-      result.set(id, element);
+      result = (result ?? persistent(big)).set(id, element);
     }
   }
-  return result ?? a;
+  return result ?? big;
 }
 
 function unionAll<T>(maps: readonly ReadonlyMap<string, T>[]): ReadonlyMap<string, T> {
   const nonEmpty = maps.filter((map) => map.size > 0);
-  const [first, ...rest] = nonEmpty;
-  if (first === undefined) return NO_ELEMENTS as ReadonlyMap<string, T>;
-  if (rest.length === 0) return first;
-  const result = new Map(first);
-  for (const map of rest) {
+  if (nonEmpty.length === 0) return NO_ELEMENTS as ReadonlyMap<string, T>;
+  let largest = nonEmpty[0] as ReadonlyMap<string, T>;
+  for (const map of nonEmpty) if (map.size > largest.size) largest = map;
+  let result: PersistentMap<T> | null = null;
+  for (const map of nonEmpty) {
+    if (map === largest) continue;
     for (const [id, element] of map) {
-      const existing = result.get(id);
+      const existing = (result ?? largest).get(id);
       if (existing === undefined || replaces(existing, element)) {
-        result.set(id, element);
+        result = (result ?? persistent(largest)).set(id, element);
       }
     }
   }
-  return result;
+  return result ?? largest;
 }
 
 /**
@@ -151,13 +246,16 @@ function unionAll<T>(maps: readonly ReadonlyMap<string, T>[]): ReadonlyMap<strin
  * шаге, O(k²) при длинной очереди дельт.
  */
 export function mergeAll(states: readonly State[]): State {
-  return {
+  const result: State = {
     created: unionAll(states.map((state) => state.created)),
     entries: unionAll(states.map((state) => state.entries)),
     supersedes: unionAll(states.map((state) => state.supersedes)),
     votes: unionAll(states.map((state) => state.votes)),
     unvotes: unionAll(states.map((state) => state.unvotes)),
   };
+  carryCellIndex(result, states);
+  carryMaxLamport(result, states);
+  return result;
 }
 
 /**
@@ -165,13 +263,16 @@ export function mergeAll(states: readonly State[]): State {
  * идемпотентно для любых состояний.
  */
 export function merge(a: State, b: State): State {
-  return {
+  const result: State = {
     created: union(a.created, b.created),
     entries: union(a.entries, b.entries),
     supersedes: union(a.supersedes, b.supersedes),
     votes: union(a.votes, b.votes),
     unvotes: union(a.unvotes, b.unvotes),
   };
+  carryCellIndex(result, [a, b]);
+  carryMaxLamport(result, [a, b]);
+  return result;
 }
 
 function sameElements<T>(a: ReadonlyMap<string, T>, b: ReadonlyMap<string, T>): boolean {
@@ -205,13 +306,8 @@ const byStampDescending = (a: Entry, b: Entry): number =>
 
 /** vis_k(X): неперекрытые записи ячейки, по убыванию метки (§ 2). */
 export function visible(state: State, key: Key): Entry[] {
-  const result: Entry[] = [];
-  for (const entry of state.entries.values()) {
-    if (entry.key.entity !== key.entity || entry.key.field !== key.field) continue;
-    if (state.supersedes.has(cellDotIdentity(key, entry.dot))) continue;
-    result.push(entry);
-  }
-  return result.sort(byStampDescending);
+  const list = cellsOf(state).get(cellKeyOf(key.entity, key.field));
+  return list ? [...list].sort(byStampDescending) : [];
 }
 
 /** win_k(X): видимая запись с наибольшей меткой; undefined, если записей нет. */
@@ -249,12 +345,50 @@ export function supersedeRecorded(state: State, key: Key, dot: Dot): boolean {
   return state.supersedes.has(cellDotIdentity(key, dot));
 }
 
-function maxLamport(state: State): number {
+/**
+ * Наибольший `lamport` среди записей. Нужен каждой новой операции (`tick`), и скан
+ * всех записей на каждую — O(n) на действие. Как и индекс ячеек, это кэш: считается
+ * один раз на «линию» состояний и переносится через `merge`/`mergeAll`.
+ */
+const maxLamportCache = new WeakMap<State, number>();
+
+function computeMaxLamport(state: State): number {
   let max = 0;
   for (const entry of state.entries.values()) {
     if (entry.stamp.lamport > max) max = entry.stamp.lamport;
   }
   return max;
+}
+
+function maxLamport(state: State): number {
+  let max = maxLamportCache.get(state);
+  if (max === undefined) {
+    max = computeMaxLamport(state);
+    maxLamportCache.set(state, max);
+  }
+  return max;
+}
+
+/** Максимум результата слияния = максимум максимумов; перебираются только записи не-базовых состояний. */
+function carryMaxLamport(result: State, states: readonly State[]): void {
+  let base: State | undefined;
+  for (const state of states) {
+    if (base === undefined || state.entries.size > base.entries.size) base = state;
+  }
+  if (base === undefined) return;
+  let max = maxLamportCache.get(base);
+  if (max === undefined) {
+    if (base.entries.size < CELL_INDEX_EAGER_SIZE) return;
+    max = computeMaxLamport(base);
+    maxLamportCache.set(base, max);
+  }
+  for (const other of states) {
+    if (other === base) continue;
+    for (const entry of other.entries.values()) {
+      if (entry.stamp.lamport > max) max = entry.stamp.lamport;
+    }
+  }
+  maxLamportCache.set(result, max);
 }
 
 /** Свежие dot и метка (§ 1.2–1.3): всё, что реплика видела, «раньше» новой операции. */
@@ -451,6 +585,28 @@ export function unvote(_state: State, voteDot: Dot, target: EntityId): Delta {
     ...EMPTY,
     unvotes: new Map([[identity(voteDot.actor, voteDot.counter, target), entry]]),
   };
+}
+
+/**
+ * `index`-й элемент таблицы состояния (`created`/`entries`/`votes`/…) по порядку
+ * итерации — O(log n) для персистентной таблицы (то есть для любого состояния,
+ * прошедшего `merge`), O(index) для обычной. Нужен выборке случайной цели без
+ * обхода всего состояния; порядок не имеет смысла ни для чего, кроме выборки.
+ */
+export function elementAt<T>(map: ReadonlyMap<string, T>, index: number): T | undefined {
+  if (map instanceof PersistentMap) return map.nth(index)?.[1];
+  if (!Number.isInteger(index) || index < 0 || index >= map.size) return undefined;
+  let position = 0;
+  for (const value of map.values()) {
+    if (position === index) return value;
+    position += 1;
+  }
+  return undefined;
+}
+
+/** Голос `vote` из `V⁺` ещё не отозван: `(dot, target) ∉ V⁻` — O(1) вместо `activeVotes` по всем голосам. */
+export function isVoteActive(state: State, vote: Vote): boolean {
+  return !state.unvotes.has(identity(vote.dot.actor, vote.dot.counter, vote.target));
 }
 
 /** Голоса участника, ещё не отозванные: active(X) из § 2. */
