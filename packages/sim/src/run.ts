@@ -28,6 +28,7 @@ import { CHECKPOINT_SPACING_DIVISOR, LONG_RUN_ACTS, type SimConfig } from "./con
 import { recordConflictAtCheckpoint } from "./coverage.js";
 import { drain } from "./drain.js";
 import { type Candidate, type Event, enabledEvents, resolveCandidate } from "./events.js";
+import type { WorldHooks } from "./hooks.js";
 import { foldNewRows } from "./oracle.js";
 import { createStreams, type Prng, type Streams } from "./prng.js";
 import type { Stats } from "./stats.js";
@@ -205,10 +206,18 @@ function fail(violation: Violation, decisions: readonly Event[], stats: Stats): 
   return { ok: false, violation, decisions, stats };
 }
 
-export async function runSimulation(config: SimConfig): Promise<RunResult> {
+export interface RunOptions {
+  /** Подмены на границах ядер — только для мутантов (`mutants.ts`), в обычном прогоне не задаётся. */
+  readonly hooks?: WorldHooks;
+}
+
+export async function runSimulation(
+  config: SimConfig,
+  options: RunOptions = {},
+): Promise<RunResult> {
   const streams = createStreams(config.seed);
   const prng = streams.selection;
-  const world = createWorld(config, streams.world);
+  const world = createWorld(config, streams.world, options.hooks);
   const wellFormedState = createWellFormedState();
   const decisions: Event[] = [];
   let nextCheckpoint = prng.int(config.checkpointMin, config.checkpointMax);

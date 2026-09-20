@@ -20,6 +20,7 @@ import {
 } from "@retro/server-core";
 import type { SnapshotObservation } from "./checks.js";
 import type { SimConfig } from "./config.js";
+import type { WorldHooks } from "./hooks.js";
 import type { Connection } from "./network.js";
 import { createOracleState, type OracleState } from "./oracle.js";
 import { deriveUuid, type Prng } from "./prng.js";
@@ -79,6 +80,8 @@ export function createClientCore(
 
 export interface World {
   readonly config: SimConfig;
+  /** Точки подмены на границах ядер (только мутанты, § 10.2); в обычном прогоне не задан. */
+  readonly hooks?: WorldHooks | undefined;
   readonly boardId: string;
   readonly guests: readonly Guest[];
   readonly clients: readonly ClientState[];
@@ -121,7 +124,7 @@ export function voterToken(boardId: string, guestId: string): string {
  * начинают офлайн (`connection: null`) — E5 подключает их по расписанию
  * планировщика, включая «поздних участников» с `lastSeq = null` с самого начала.
  */
-export function createWorld(config: SimConfig, prng: Prng): World {
+export function createWorld(config: SimConfig, prng: Prng, hooks?: WorldHooks): World {
   const boardId = prng.uuid();
 
   // Гости и роли (§ 3): ровно один owner, 0–1 facilitator, 0–1 viewer,
@@ -176,10 +179,14 @@ export function createWorld(config: SimConfig, prng: Prng): World {
     store.addMember(boardId, guest.id, guest.role, guest.displayName);
   }
 
-  const server = createBoardServer({
-    store,
+  // Мутанты подменяют поведение только на границах: порт хранилища и ядро сервера. Настройка
+  // мира (доска, участники) выше идёт с настоящим хранилищем; дальше мир и сервер видят обёртку.
+  const worldStore = hooks?.wrapStore?.(store) ?? store;
+  const realServer = createBoardServer({
+    store: worldStore,
     voterToken: (boardIdArg, guestId) => voterToken(boardIdArg, guestId),
   });
+  const server = hooks?.wrapServer?.(realServer, { store: worldStore, boardId }) ?? realServer;
 
   const clients: ClientState[] = [];
   for (let guestIndex = 0; guestIndex < guestCount; guestIndex++) {
@@ -203,8 +210,9 @@ export function createWorld(config: SimConfig, prng: Prng): World {
     guests,
     clients,
     connections: [],
-    store,
+    store: worldStore,
     server,
+    hooks,
     acts: 0,
     recent: [],
     stats: createStats(),

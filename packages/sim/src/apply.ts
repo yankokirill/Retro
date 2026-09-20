@@ -224,8 +224,10 @@ async function applyDeliverToServer(
 function applyDeliverToClient(world: World, connectionIndex: number): StepObservation {
   const connection = world.connections[connectionIndex];
   if (!connection) return EMPTY;
-  const raw = connection.toClient.shift();
-  if (raw === undefined) return EMPTY;
+  const queued = connection.toClient.shift();
+  if (queued === undefined) return EMPTY;
+  // Сеть «сервер → клиент» (единственное место подмены, § 10.2 M2): дальше мир и клиент видят то, что дошло.
+  const raw = world.hooks?.toClient?.(queued) ?? queued;
 
   const client = findClientByConnection(world, connectionIndex);
   if (!client)
@@ -294,7 +296,8 @@ function applyDeliverToClient(world: World, connectionIndex: number): StepObserv
     clientLearnsClose(world, connectionIndex);
   }
   if (connection.alive) {
-    for (const replyRaw of replies) {
+    const sent = world.hooks?.clientReplies?.(raw, replies) ?? replies;
+    for (const replyRaw of sent) {
       connection.toServer.push(replyRaw);
       noteMessageBytes(world, "toServer", replyRaw);
     }
