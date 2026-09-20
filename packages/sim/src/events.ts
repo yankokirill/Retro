@@ -141,7 +141,13 @@ export function enabledEvents(world: World, mode: EventMode): readonly Candidate
   world.clients.forEach((client, clientIndex) => {
     const guest = world.guests[client.guestIndex];
     if (!guest) return;
-    if ((guest.role === "owner" || guest.role === "facilitator") && client.connection !== null) {
+    // Ядро клиента отправляет команду только после welcome (`command()` до него возвращает []):
+    // предложенная раньше команда молча пропадала, и фаза почти не менялась.
+    if (
+      (guest.role === "owner" || guest.role === "facilitator") &&
+      client.connection !== null &&
+      client.core.inspect().status === "welcomed"
+    ) {
       events.push({ kind: "command", client: clientIndex });
     }
   });
