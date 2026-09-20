@@ -19,6 +19,8 @@
     "test:unit": "npm run test --workspaces --if-present",
     "test:int": "npm run test:int --workspaces --if-present",
     "test:sim": "npm run test:sim --workspaces --if-present",
+    "sim": "npm run sim -w @retro/sim --",
+    "sim:long": "npm run sim:long -w @retro/sim --",
     "dev:server": "npm run dev -w apps/server",
     "dev:web": "npm run dev -w apps/web",
     "db:generate": "npm run db:generate -w apps/server",

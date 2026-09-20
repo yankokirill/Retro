@@ -19,6 +19,7 @@ import {
   DEFAULT_PROFILE_NAME,
   type Profile,
 } from "./config.js";
+import type { Event } from "./events.js";
 import { runSimulation } from "./run.js";
 import { createTrace, serializeTrace } from "./trace.js";
 
@@ -90,64 +91,120 @@ function randomSeed(): number {
   return Math.floor(Math.random() * 0x1_00_00_00_00);
 }
 
+function formatBytes(stats: { toServer: number; toClient: number }): string {
+  return `toServer=${stats.toServer} toClient=${stats.toClient}`;
+}
+
+function formatCounts(counts: Partial<Record<string, number>>): string {
+  const entries = Object.entries(counts).filter(([, n]) => n);
+  return entries.length === 0 ? "—" : entries.map(([key, n]) => `${key}=${n}`).join(" ");
+}
+
+function formatSeconds(ms: number): string {
+  return `${(ms / 1000).toFixed(1)}s`;
+}
+
+function describeEvent(event: Event): string {
+  const parts: string[] = [event.kind];
+  if ("client" in event) parts.push(`client=${event.client}`);
+  if ("connection" in event) parts.push(`conn=${event.connection}`);
+  if ("direction" in event) parts.push(event.direction);
+  return parts.join(":");
+}
+
 export async function main(argv: readonly string[]): Promise<number> {
   const parsed = parseCliArgs(argv);
   if (!parsed.ok) {
     console.error(`sim: ${parsed.error}`);
     return 2;
   }
+  const { quiet } = parsed.args;
 
   const seed = parsed.args.seed ?? randomSeed();
-  console.log(seed);
+  // § 11.1: seed печатается первой строкой; при --quiet он входит в итоговую строку.
+  if (!quiet) console.log(seed);
 
-  const configInput: ConfigInput = {
+  const built = buildConfig({
     seed,
     clients: parsed.args.clients,
     ops: parsed.args.ops,
     profile: parsed.args.profile as Profile,
     checkpointMin: parsed.args.checkpointMin,
     checkpointMax: parsed.args.checkpointMax,
-  };
-  const built = buildConfig(configInput);
+  });
   if (!built.ok) {
     console.error(`sim: ${built.error}`);
     return 2;
   }
+  const { config } = built;
+  const label = `seed=${seed} profile=${config.profile.name} clients=${config.clients} ops=${config.ops}`;
 
-  const result = await runSimulation(built.config);
+  const started = Date.now();
+  let result: Awaited<ReturnType<typeof runSimulation>>;
+  try {
+    result = await runSimulation(config);
+  } catch (err) {
+    // Исключение из самого симулятора или ядер — не нарушение свойства (§ 11.1, код 2).
+    console.error(
+      `sim: внутренняя ошибка (${label}): ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
+    );
+    return 2;
+  }
+  const elapsed = formatSeconds(Date.now() - started);
+  const { stats } = result;
+
+  const trace = createTrace(
+    seed,
+    {
+      clients: config.clients,
+      ops: config.ops,
+      profile: config.profile.name,
+      checkpointMin: config.checkpointMin,
+      checkpointMax: config.checkpointMax,
+    },
+    result.decisions,
+  );
+  const writeTrace = async (path: string): Promise<void> => {
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, serializeTrace(trace), "utf8");
+  };
 
   if (result.ok) {
-    if (!parsed.args.quiet) {
+    console.log(`OK ${label} steps=${stats.steps} time=${elapsed}`);
+    if (!quiet) {
+      console.log(`  E1 по намерениям: ${formatCounts(stats.actsByIntent)}`);
       console.log(
-        JSON.stringify({ ok: true, steps: result.stats.steps, accepted: result.stats.accepted }),
+        `  принято операций: ${stats.accepted}; отказы по причинам: ${formatCounts(stats.rejectedByReason)}`,
       );
+      console.log(
+        `  разрывы: ${stats.cuts}; перезагрузки: ${stats.reloads}; дубли ack: ${stats.duplicateAcks}; контрольные точки: ${stats.checkpoints}`,
+      );
+      console.log(
+        `  max |P|: ${stats.maxPending}; max сообщение (байт): ${formatBytes(stats.maxMessageBytes)}`,
+      );
+    }
+    if (parsed.args.trace !== undefined) {
+      await writeTrace(parsed.args.trace);
+      console.log(`trace: ${parsed.args.trace}`);
     }
     return 0;
   }
 
-  console.error(
-    `SIM FAIL ${result.violation.property} at step ${result.violation.step}: ${result.violation.message}`,
-  );
-  console.error(
-    `repro:    npm run sim -- --profile=${built.config.profile.name} --clients=${built.config.clients} --ops=${built.config.ops} --seed=${seed}`,
-  );
-
+  const { violation } = result;
   const tracePath = parsed.args.trace ?? `.sim/fail-${seed}.json`;
-  const trace = createTrace(
-    seed,
-    {
-      clients: built.config.clients,
-      ops: built.config.ops,
-      profile: built.config.profile.name,
-      checkpointMin: built.config.checkpointMin,
-      checkpointMax: built.config.checkpointMax,
-    },
-    result.decisions,
+  console.error(
+    `SIM FAIL ${violation.property} at step ${violation.step}, checkpoint ${stats.checkpoints}`,
   );
-  await mkdir(dirname(tracePath), { recursive: true });
-  await writeFile(tracePath, serializeTrace(trace), "utf8");
-  console.error(`trace:    ${tracePath}`);
-
+  console.error(`  ${label}`);
+  console.error(`  ${violation.message}`);
+  if (violation.detail !== undefined)
+    console.error(`  detail: ${JSON.stringify(violation.detail)}`);
+  console.error(`  last events: ${result.decisions.slice(-8).map(describeEvent).join(" ")}`);
+  console.error(
+    `  repro:    npm run sim -- --profile=${config.profile.name} --clients=${config.clients} --ops=${config.ops} --seed=${seed}`,
+  );
+  await writeTrace(tracePath);
+  console.error(`  trace:    ${tracePath}`);
   return 1;
 }
 
