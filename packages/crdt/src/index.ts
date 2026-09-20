@@ -50,6 +50,31 @@ function canonical(value: unknown): string {
   return `{${fields.join(",")}}`;
 }
 
+/** Структурное равенство JSON-подобных значений без выделения строк (быстрый путь перед `canonical`). */
+function sameValue(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (a === null || b === null || typeof a !== "object" || typeof b !== "object") return false;
+  if (Array.isArray(a)) {
+    if (!Array.isArray(b) || a.length !== b.length) return false;
+    return a.every((item, index) => sameValue(item, b[index]));
+  }
+  if (Array.isArray(b)) return false;
+  const left = a as Record<string, unknown>;
+  const right = b as Record<string, unknown>;
+  const keys = Object.keys(left);
+  if (keys.length !== Object.keys(right).length) return false;
+  return keys.every((key) => key in right && sameValue(left[key], right[key]));
+}
+
+/** `element` вытесняет `existing` при одной идентичности: канонически наибольший (W1). */
+function replaces<T>(existing: T, element: T): boolean {
+  return (
+    existing !== element &&
+    !sameValue(existing, element) &&
+    canonical(element) > canonical(existing)
+  );
+}
+
 const NO_ELEMENTS: ReadonlyMap<string, never> = new Map<string, never>();
 
 const EMPTY: State = {
@@ -95,10 +120,7 @@ function union<T>(a: ReadonlyMap<string, T>, b: ReadonlyMap<string, T>): Readonl
   let result: Map<string, T> | null = null;
   for (const [id, element] of b) {
     const existing = (result ?? a).get(id);
-    if (
-      existing === undefined ||
-      (existing !== element && canonical(element) > canonical(existing))
-    ) {
+    if (existing === undefined || replaces(existing, element)) {
       result ??= new Map(a);
       result.set(id, element);
     }
@@ -115,10 +137,7 @@ function unionAll<T>(maps: readonly ReadonlyMap<string, T>[]): ReadonlyMap<strin
   for (const map of rest) {
     for (const [id, element] of map) {
       const existing = result.get(id);
-      if (
-        existing === undefined ||
-        (existing !== element && canonical(element) > canonical(existing))
-      ) {
+      if (existing === undefined || replaces(existing, element)) {
         result.set(id, element);
       }
     }
