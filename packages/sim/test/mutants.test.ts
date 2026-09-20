@@ -23,8 +23,8 @@ const PLANS: Record<MutantId, Plan> = {
   M1: { profile: "default", clients: 5, ops: 400, seeds: SEEDS, properties: ["S9", "S6"] },
   M2: { profile: "default", clients: 5, ops: 400, seeds: SEEDS, properties: ["S3", "S4"] },
   M3: { profile: "default", clients: 5, ops: 400, seeds: SEEDS, properties: ["S10"] },
-  M4: { profile: "default", clients: 5, ops: 400, seeds: SEEDS, properties: ["S7"] },
-  M5: { profile: "faults", clients: 5, ops: 500, seeds: SEEDS, properties: ["S7"] },
+  M4: { profile: "default", clients: 5, ops: 400, seeds: SEEDS, properties: ["S7", "S4"] },
+  M5: { profile: "faults", clients: 5, ops: 500, seeds: SEEDS, properties: ["S7", "S4", "S10"] },
   M6: {
     profile: "default",
     clients: 5,
