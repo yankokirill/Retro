@@ -17,6 +17,7 @@ import {
   fromWire,
   materialize,
   merge,
+  mergeAll,
   move,
   newClock,
   renameGroup,
@@ -133,9 +134,8 @@ function buildEntry(
  * не k, а одна.
  */
 function withPending(confirmed: State, pending: readonly PendingEntry[]): State {
-  let deltas = empty();
-  for (const entry of pending) deltas = merge(deltas, fromWire(entry.delta));
-  return merge(confirmed, deltas);
+  if (pending.length === 0) return confirmed;
+  return mergeAll([confirmed, ...pending.map((entry) => fromWire(entry.delta))]);
 }
 
 function dotEquals(a: Dot, b: Dot): boolean {

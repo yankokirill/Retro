@@ -106,6 +106,41 @@ function union<T>(a: ReadonlyMap<string, T>, b: ReadonlyMap<string, T>): Readonl
   return result ?? a;
 }
 
+function unionAll<T>(maps: readonly ReadonlyMap<string, T>[]): ReadonlyMap<string, T> {
+  const nonEmpty = maps.filter((map) => map.size > 0);
+  const [first, ...rest] = nonEmpty;
+  if (first === undefined) return NO_ELEMENTS as ReadonlyMap<string, T>;
+  if (rest.length === 0) return first;
+  const result = new Map(first);
+  for (const map of rest) {
+    for (const [id, element] of map) {
+      const existing = result.get(id);
+      if (
+        existing === undefined ||
+        (existing !== element && canonical(element) > canonical(existing))
+      ) {
+        result.set(id, element);
+      }
+    }
+  }
+  return result;
+}
+
+/**
+ * ⨆ states — то же, что левая свёртка `merge` по списку, но за один проход и
+ * с одной копией: `states.reduce(merge)` копирует растущий накопитель на каждом
+ * шаге, O(k²) при длинной очереди дельт.
+ */
+export function mergeAll(states: readonly State[]): State {
+  return {
+    created: unionAll(states.map((state) => state.created)),
+    entries: unionAll(states.map((state) => state.entries)),
+    supersedes: unionAll(states.map((state) => state.supersedes)),
+    votes: unionAll(states.map((state) => state.votes)),
+    unvotes: unionAll(states.map((state) => state.unvotes)),
+  };
+}
+
 /**
  * X ⊔ Y — покомпонентное объединение (§ 2). Коммутативно, ассоциативно,
  * идемпотентно для любых состояний.
