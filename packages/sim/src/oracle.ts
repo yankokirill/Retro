@@ -51,7 +51,10 @@ function isVisible(
   guestId: string,
 ): boolean {
   if (phase !== "collect") return true;
-  if (kindOf.get(id) !== "sticker") return true;
+  // Стикер — это либо известный вид `sticker`, либо сущность с записанным автором: `created`
+  // мог быть скрыт от получателя или ещё не прийти, а записи/голоса на неё уже есть.
+  const isSticker = kindOf.get(id) === "sticker" || stickerAuthor.has(id);
+  if (!isSticker) return true;
   return stickerAuthor.get(id) === guestId;
 }
 

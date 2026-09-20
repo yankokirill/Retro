@@ -90,22 +90,18 @@ describe("SIM-02 кр. 2: ядра и симулятор не читают ча�
 });
 
 describe("SIM-02 кр. 1: два прогона с одинаковым seed дают одинаковый результат", () => {
-  it(
-    "SIM-02 кр. 1: runSimulation(seed=42) дважды в одном процессе — одинаковые decisions/stats.steps/итог. " +
-      "Сейчас ожидаемо красный: runSimulation ещё не реализован (заглушка).",
-    async () => {
-      const configResult = buildConfig({ seed: 42, clients: 3, ops: 50 });
-      if (!configResult.ok) throw new Error(`buildConfig failed: ${configResult.error}`);
+  it("SIM-02 кр. 1: runSimulation(seed=42) дважды в одном процессе — одинаковые decisions/stats.steps/итог", async () => {
+    const configResult = buildConfig({ seed: 42, clients: 3, ops: 50 });
+    if (!configResult.ok) throw new Error(`buildConfig failed: ${configResult.error}`);
 
-      const first = await runSimulation(configResult.config);
-      const second = await runSimulation(configResult.config);
+    const first = await runSimulation(configResult.config);
+    const second = await runSimulation(configResult.config);
 
-      expect(first.ok).toBe(second.ok);
-      expect(first.decisions).toEqual(second.decisions);
-      expect(first.stats.steps).toEqual(second.stats.steps);
-      if (!first.ok && !second.ok) {
-        expect(first.violation).toEqual(second.violation);
-      }
-    },
-  );
+    expect(first.ok).toBe(second.ok);
+    expect(first.decisions).toEqual(second.decisions);
+    expect(first.stats.steps).toEqual(second.stats.steps);
+    if (!first.ok && !second.ok) {
+      expect(first.violation).toEqual(second.violation);
+    }
+  });
 });

@@ -189,6 +189,37 @@ describe("SIM-XX / proj: REQ-006 — видимость стикеров в coll
   });
 });
 
+describe("SIM-XX / proj: вид сущности определяется по stickerAuthor, а не по наличию created (REQ-006)", () => {
+  /** Состояние, у которого `created` скрыт/ещё не пришёл, а записи, голоса и перекрытия есть. */
+  function withoutCreated(state: State): State {
+    return { ...state, created: empty().created };
+  }
+
+  it("SIM-XX / proj: в collect записи чужого стикера скрыты, даже если его created в состоянии нет", () => {
+    const { state, stickerAuthor, sticker2 } = buildFixture();
+    // sticker2 написан GUEST_2; у него в состоянии есть записи, но created убран.
+    const partial = withoutCreated(state);
+    expect([...partial.entries.values()].some((e) => e.key.entity === sticker2)).toBe(true);
+    const actual = proj(partial, "collect", stickerAuthor, GUEST_1);
+    expect([...actual.entries.values()].some((e) => e.key.entity === sticker2)).toBe(false);
+    expect([...actual.supersedes.values()].some((e) => e.key.entity === sticker2)).toBe(false);
+    expect([...actual.votes.values()].some((v) => v.target === sticker2)).toBe(false);
+    expect([...actual.unvotes.values()].some((u) => u.target === sticker2)).toBe(false);
+  });
+
+  it("SIM-XX / proj: в collect автор по-прежнему видит записи своего стикера без created", () => {
+    const { state, stickerAuthor, sticker2 } = buildFixture();
+    const actual = proj(withoutCreated(state), "collect", stickerAuthor, GUEST_2);
+    expect([...actual.entries.values()].some((e) => e.key.entity === sticker2)).toBe(true);
+  });
+
+  it("SIM-XX / proj: вне collect записи сущности без created видны всем", () => {
+    const { state, stickerAuthor, sticker2 } = buildFixture();
+    const actual = proj(withoutCreated(state), "group", stickerAuthor, GUEST_1);
+    expect([...actual.entries.values()].some((e) => e.key.entity === sticker2)).toBe(true);
+  });
+});
+
 describe("SIM-XX / visibleSame: proj_a(X) equals proj_b(X) — S5", () => {
   it("SIM-XX / visibleSame: два гостя, ни один не автор ни одного стикера — одинаковая видимость (true)", () => {
     const { state, stickerAuthor } = buildFixture();

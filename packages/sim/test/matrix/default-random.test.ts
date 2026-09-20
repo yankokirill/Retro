@@ -4,4 +4,4 @@ import { defineMatrixCase } from "../matrix-case.js";
 
 const seed = Number(process.env.SIM_SEED ?? Math.floor(Math.random() * 2 ** 31));
 console.log(`SIM-09: случайный seed профиля default = ${seed} (повтор: SIM_SEED=${seed})`);
-defineMatrixCase("default", seed, 5);
+defineMatrixCase("default", seed, 5, "default-random.json");

@@ -85,15 +85,20 @@ export function createPrng(seed: number): Prng {
     const total = items.reduce((sum, [, weight]) => sum + weight, 0);
     if (!(total > 0)) throw new Error("Prng.pick: total weight must be positive");
     let r = next() * total;
+    let lastPositive: T | undefined;
+    let found = false;
     for (const [item, weight] of items) {
+      if (!(weight > 0)) continue; // нулевой вес — вид отключён, выбираться не может
+      lastPositive = item;
+      found = true;
       if (r < weight) return item;
       r -= weight;
     }
-    // Плавающая точка: остаток может не дойти до последнего элемента из-за
-    // накопленной ошибки округления — берём последний как гарантированный fallback.
-    const last = items[items.length - 1];
-    if (!last) throw new Error("Prng.pick: unreachable");
-    return last[0];
+    // Плавающая точка: остаток может не дойти до конца из-за накопленной ошибки
+    // округления — берём последний элемент с ПОЛОЖИТЕЛЬНЫМ весом, а не просто последний
+    // (им может оказаться отключённый профилем вид).
+    if (!found) throw new Error("Prng.pick: unreachable");
+    return lastPositive as T;
   };
 
   const uuid = (): string => {

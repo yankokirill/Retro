@@ -52,6 +52,11 @@ function run({ profile, clients, seed }) {
     let output = "";
     child.stdout.on("data", (chunk) => (output += chunk));
     child.stderr.on("data", (chunk) => (output += chunk));
+    // Процесс мог не запуститься (лимит дескрипторов/процессов): это упавший прогон, а не
+    // необработанное исключение, которое уронило бы весь sim:long.
+    child.on("error", (error) => {
+      resolve({ code: 1, output: `не удалось запустить прогон: ${error.message}` });
+    });
     child.on("close", (code) => {
       // --trace пишет трассу и при успехе; оставляем только трассы упавших прогонов.
       if (code === 0) rmSync(tracePath, { force: true });

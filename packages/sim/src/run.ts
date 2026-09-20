@@ -96,7 +96,9 @@ function chooseEvent(world: World, candidates: readonly Candidate[], prng: Prng)
   while (remainingKinds.size > 0) {
     const weighted: (readonly [Candidate["kind"], number])[] = KIND_ORDER.filter((k) =>
       remainingKinds.has(k),
-    ).map((k) => [k, eventWeight(world, k)] as const);
+    )
+      .map((k) => [k, eventWeight(world, k)] as const)
+      .filter(([, weight]) => weight > 0);
     const totalWeight = weighted.reduce((sum, [, w]) => sum + w, 0);
 
     // Виды с нулевым весом профиль отключил (storeFault вне `faults`, snapshot в `reveal`):
