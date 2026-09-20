@@ -362,6 +362,12 @@ export function generateCommand(world: World, clientIndex: number, prng: Prng): 
   const phase = world.store.boardSync(world.boardId)?.phase ?? "collect";
   const profile = world.config.profile;
 
+  // reveal только при клиенте без соединения (профиль reveal, H1): иначе — не сейчас.
+  if (phase === "collect" && profile.revealNeedsOffline) {
+    const someoneOffline = world.clients.some((c, i) => i !== clientIndex && c.connection === null);
+    if (!someoneOffline) return null;
+  }
+
   if (phase === "vote" && prng.next() < profile.resetVotesShare) {
     return { type: "resetVotes" };
   }

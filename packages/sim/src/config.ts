@@ -67,6 +67,13 @@ export interface ProfileConfig {
   readonly intentWeights: IntentWeightsByPhase;
   /** Доля `resetVotes` среди `command` в фазе `vote` (§ 5.6). */
   readonly resetVotesShare: number;
+  /**
+   * Первый `setPhase` из `collect` (reveal) выдаётся только при наличии клиента без
+   * соединения (§ 5.3, профиль `reveal`: «разрывы и перезагрузки вокруг первого
+   * `setPhase`»). Без этого условия сценарий H1 (клиент офлайн в момент reveal)
+   * случается в единицах прогонов из десяти, и регрессия досылки проходит матрицу.
+   */
+  readonly revealNeedsOffline: boolean;
   /** Из какого диапазона генератор берёт `voteLimit` при создании доски (§ 3). */
   readonly voteLimitRange: readonly [number, number];
 }
@@ -135,6 +142,7 @@ function profile(overrides: Partial<ProfileConfig> & { readonly name: Profile })
     defaultIntentWeight: 1,
     intentWeights: BASE_INTENTS,
     resetVotesShare: 0.1,
+    revealNeedsOffline: false,
     voteLimitRange: [1, 3],
     ...overrides,
   };
@@ -153,7 +161,8 @@ const PROFILE_CONFIGS: Readonly<Record<Profile, ProfileConfig>> = {
   }),
   reveal: profile({
     name: "reveal",
-    events: { ...BASE_EVENTS, cut: 5, serverNotice: 6, reload: 2 },
+    events: { ...BASE_EVENTS, cut: 8, serverNotice: 6, reload: 0.5, snapshot: 0 },
+    revealNeedsOffline: true,
   }),
   votes: profile({
     name: "votes",
