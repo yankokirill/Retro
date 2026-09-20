@@ -53,7 +53,13 @@ export function enabledEvents(world: World, mode: EventMode): readonly Candidate
   const events: Candidate[] = [];
 
   world.connections.forEach((connection, connectionIndex) => {
-    if (!connection.alive) return;
+    if (!connection.alive) {
+      // закрытое сервером соединение: клиент ещё дочитывает уже поставленное
+      if (connection.serverClosed && connection.toClient.length > 0) {
+        events.push({ kind: "deliver", connection: connectionIndex, direction: "toClient" });
+      }
+      return;
+    }
     if (connection.toServer.length > 0) {
       events.push({ kind: "deliver", connection: connectionIndex, direction: "toServer" });
     }

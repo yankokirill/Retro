@@ -31,40 +31,55 @@ export async function drain(
   decisions: Event[],
   step: (event: Event) => Promise<Violation | null>,
 ): Promise<Violation | null> {
-  // 2. Все клиенты без соединения подключаются.
-  for (let i = 0; i < world.clients.length; i++) {
-    const client = world.clients[i];
-    if (!client || client.connection !== null) continue;
-    const event: Event = { kind: "connect", client: i };
-    decisions.push(event);
-    const result = await step(event);
-    if (result) return result;
-  }
-
-  // 3. Все отложенные E4 (сервер узнаёт о разрыве) выполняются.
-  for (let i = 0; i < world.connections.length; i++) {
-    const connection = world.connections[i];
-    if (!connection || connection.alive || !connection.noticePending) continue;
-    const event: Event = { kind: "serverNotice", connection: i };
-    decisions.push(event);
-    const result = await step(event);
-    if (result) return result;
-  }
-
-  // 4. Доставка (E2) в случайном порядке, пока хотя бы один канал не пуст.
   const budget = drainBudget(world);
   let deliveries = 0;
-  while (deliveries < budget) {
-    const candidates = enabledEvents(world, "drain");
-    if (candidates.length === 0) break;
-    const chosenCandidate = candidates[prng.int(0, candidates.length - 1)];
-    if (!chosenCandidate) break;
-    const event = resolveCandidate(world, chosenCandidate, prng);
-    if (!event) break; // deliver-кандидаты всегда резолвятся — защитный выход
-    decisions.push(event);
-    const result = await step(event);
-    if (result) return result;
-    deliveries += 1;
+
+  // Раунд: подключить всех офлайн, снять отложенные E4, доставлять до пустоты.
+  // Раундов может быть больше одного: взведённый ранее сбой хранилища (E9) срабатывает
+  // на первой же записи уже во время досылки, сервер закрывает соединение, клиент
+  // уходит в офлайн — «покой» требует подключить его снова.
+  for (;;) {
+    let progressed = false;
+
+    // 2. Все клиенты без соединения подключаются.
+    for (let i = 0; i < world.clients.length; i++) {
+      const client = world.clients[i];
+      if (!client || client.connection !== null) continue;
+      const event: Event = { kind: "connect", client: i };
+      decisions.push(event);
+      const result = await step(event);
+      if (result) return result;
+      progressed = true;
+    }
+
+    // 3. Все отложенные E4 (сервер узнаёт о разрыве) выполняются.
+    for (let i = 0; i < world.connections.length; i++) {
+      const connection = world.connections[i];
+      if (!connection || connection.alive || !connection.noticePending) continue;
+      const event: Event = { kind: "serverNotice", connection: i };
+      decisions.push(event);
+      const result = await step(event);
+      if (result) return result;
+      progressed = true;
+    }
+
+    // 4. Доставка (E2) в случайном порядке, пока хотя бы один канал не пуст.
+    while (deliveries < budget) {
+      const candidates = enabledEvents(world, "drain");
+      if (candidates.length === 0) break;
+      const chosenCandidate = candidates[prng.int(0, candidates.length - 1)];
+      if (!chosenCandidate) break;
+      const event = resolveCandidate(world, chosenCandidate, prng);
+      if (!event) break; // deliver-кандидаты всегда резолвятся — защитный выход
+      decisions.push(event);
+      const result = await step(event);
+      if (result) return result;
+      deliveries += 1;
+      progressed = true;
+    }
+
+    const stillOffline = world.clients.some((c) => c.connection === null);
+    if (!stillOffline || !progressed || deliveries >= budget) break;
   }
 
   const channelsNonEmpty = world.connections.some(

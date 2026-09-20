@@ -12,12 +12,27 @@ export interface Connection {
   readonly toServer: string[];
   readonly toClient: string[];
   alive: boolean;
+  /**
+   * Соединение закрыл сервер (ядро вернуло `close`, например после `error`).
+   * Как у настоящего сокета: то, что сервер уже поставил в `toClient`, клиент
+   * ещё дочитает, а то, что клиент отправил, сервер уже не прочтёт. После
+   * дочитывания клиент узнаёт о закрытии.
+   */
+  serverClosed: boolean;
   /** E3 произошёл, E4 (`serverNotice`) ещё не доставлен — сервер может адресовать соединению сообщения, они теряются (§ 4.2). */
   noticePending: boolean;
 }
 
 export function createConnection(id: string, clientIndex: number): Connection {
-  return { id, clientIndex, toServer: [], toClient: [], alive: true, noticePending: false };
+  return {
+    id,
+    clientIndex,
+    toServer: [],
+    toClient: [],
+    alive: true,
+    serverClosed: false,
+    noticePending: false,
+  };
 }
 
 /** Непустой канал в заданном направлении. */

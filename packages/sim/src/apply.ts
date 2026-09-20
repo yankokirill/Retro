@@ -182,7 +182,10 @@ async function applyDeliverToServer(
     const target = idx === -1 ? undefined : world.connections[idx];
     if (target) {
       target.alive = false;
+      target.serverClosed = true;
+      target.toServer.length = 0; // сервер закрыл — отправленное клиентом уже не прочтёт
       await world.server.close(target.id);
+      if (target.toClient.length === 0) clientLearnsClose(world, idx);
     }
   }
 
@@ -238,13 +241,25 @@ function applyDeliverToClient(world: World, connectionIndex: number): StepObserv
 
   const replies = client.core.receive(raw);
   if (parsed.success && parsed.data.type === "error") {
+    // error приходит перед закрытием соединения сервером: клиент уходит в офлайн
+    client.core.disconnected();
     client.connection = null;
+  } else if (connection.serverClosed && connection.toClient.length === 0) {
+    clientLearnsClose(world, connectionIndex);
   }
   if (connection.alive) {
     for (const replyRaw of replies) connection.toServer.push(replyRaw);
   }
 
   return { newLogRows: [], acks, rejects, outgoing: [], sentRaw: [{ direction: "toClient", raw }] };
+}
+
+/** Клиент узнаёт, что сервер закрыл соединение и в канале больше ничего нет: уходит в офлайн (тогда E5 подключит его заново). */
+function clientLearnsClose(world: World, connectionIndex: number): void {
+  const client = findClientByConnection(world, connectionIndex);
+  if (!client) return;
+  client.core.disconnected();
+  client.connection = null;
 }
 
 function applyCut(world: World, connectionIndex: number): StepObservation {
