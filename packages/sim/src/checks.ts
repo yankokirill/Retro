@@ -163,15 +163,81 @@ function checkNoDuplicateOps(world: World, step: number): Violation | null {
 // (ВС-6, docs/spec/simulator.md § 13).
 // ---------------------------------------------------------------------------
 
+/** Сколько элементов каждого компонента есть у `a` и нет у `b`; для `created` — ещё несколько id. */
+interface StateDelta {
+  readonly created: readonly EntityId[];
+  readonly createdCount: number;
+  readonly entries: number;
+  readonly votes: number;
+  readonly unvotes: number;
+}
+
+function onlyIn(a: State, b: State): StateDelta {
+  const has = (state: State) => {
+    const created = new Set<string>();
+    for (const c of state.created.values()) created.add(c.id);
+    const entries = new Set<string>();
+    for (const e of state.entries.values()) {
+      entries.add(`${e.key.entity}|${e.key.field}|${dotKey(e.dot)}`);
+    }
+    const votes = new Set<string>();
+    for (const v of state.votes.values()) votes.add(dotKey(v.dot));
+    const unvotes = new Set<string>();
+    for (const u of state.unvotes.values()) unvotes.add(`${dotKey(u.dot)}|${u.target}`);
+    return { created, entries, votes, unvotes };
+  };
+  const other = has(b);
+  const created: EntityId[] = [];
+  let createdCount = 0;
+  for (const c of a.created.values()) {
+    if (other.created.has(c.id)) continue;
+    createdCount += 1;
+    if (created.length < 5) created.push(c.id);
+  }
+  let entries = 0;
+  for (const e of a.entries.values()) {
+    if (!other.entries.has(`${e.key.entity}|${e.key.field}|${dotKey(e.dot)}`)) entries += 1;
+  }
+  let votes = 0;
+  for (const v of a.votes.values()) if (!other.votes.has(dotKey(v.dot))) votes += 1;
+  let unvotes = 0;
+  for (const u of a.unvotes.values()) {
+    if (!other.unvotes.has(`${dotKey(u.dot)}|${u.target}`)) unvotes += 1;
+  }
+  return { created, createdCount, entries, votes, unvotes };
+}
+
 export function checkClientsMatchOracle(world: World, step: number): Violation | null {
   const phase = boardPhase(world);
-  for (const client of world.clients) {
+  for (let index = 0; index < world.clients.length; index++) {
+    const client = world.clients[index];
+    if (!client) continue;
     const guest = world.guests[client.guestIndex];
     if (!guest) continue;
-    const confirmed = client.core.inspect().confirmed;
-    const expected = proj(world.oracle.x, phase, world.oracle.stickerAuthor, guest.id);
-    if (!equals(compact(confirmed), compact(expected))) {
-      return violation("S4", step, `клиент гостя ${guest.id}: compact(X_c) ≠ compact(proj_u(X_S))`);
+    const snapshot = client.core.inspect();
+    const actual = compact(snapshot.confirmed);
+    const expected = compact(proj(world.oracle.x, phase, world.oracle.stickerAuthor, guest.id));
+    if (!equals(actual, expected)) {
+      // § 9.3: чего не хватает клиенту и что у него лишнее — иначе минимальная трасса есть,
+      // а объяснения нет. `connections` нужны CLI, чтобы показать последние события клиента.
+      const connections: number[] = [];
+      world.connections.forEach((connection, connectionIndex) => {
+        if (connection.clientIndex === index) connections.push(connectionIndex);
+      });
+      return violation(
+        "S4",
+        step,
+        `клиент гостя ${guest.id}: compact(X_c) ≠ compact(proj_u(X_S))`,
+        {
+          client: index,
+          guest: guest.id,
+          role: guest.role,
+          actor: snapshot.actorId,
+          connections,
+          missingInClient: onlyIn(expected, actual),
+          extraInClient: onlyIn(actual, expected),
+        },
+      );
     }
   }
   return null;

@@ -22,9 +22,10 @@ import {
   type Profile,
 } from "./config.js";
 import type { Event } from "./events.js";
+import { DEFAULT_MINIMIZE_BUDGET, minimizeTrace } from "./minimize.js";
 import { replayTrace } from "./replay.js";
 import { runSimulation } from "./run.js";
-import { createTrace, parseTrace, serializeTrace, TraceError } from "./trace.js";
+import { createTrace, parseTrace, serializeTrace, type Trace, TraceError } from "./trace.js";
 import type { Violation } from "./violation.js";
 
 export interface ParsedArgs {
@@ -38,6 +39,12 @@ export interface ParsedArgs {
   readonly quiet: boolean;
   /** Путь к трассе для `--replay`; в этом режиме флаги прогона не принимаются. */
   readonly replay: string | undefined;
+  /** Минимизировать упавшую трассу (ddmin, § 9.2): вместе с `--replay` или после упавшего прогона. */
+  readonly minimize: boolean;
+  /** Максимум прогонов воспроизведения при минимизации. */
+  readonly minimizeBudget: number;
+  /** Куда писать минимальную трассу; по умолчанию `<трасса>.min.json`. */
+  readonly out: string | undefined;
 }
 
 export type ParseResult =
@@ -54,6 +61,9 @@ const CLI_OPTIONS = {
   trace: { type: "string" },
   quiet: { type: "boolean" },
   replay: { type: "string" },
+  minimize: { type: "boolean" },
+  "minimize-budget": { type: "string" },
+  out: { type: "string" },
 } as const;
 
 /** Разбор `argv` без побочных эффектов — сама случайность (seed по умолчанию) остаётся снаружи, в `main`. */
@@ -106,7 +116,21 @@ export function parseCliArgs(argv: readonly string[]): ParseResult {
   const ops = toInt("ops", values.ops, DEFAULT_OPS);
   const checkpointMin = toInt("checkpoint-min", values["checkpoint-min"], DEFAULT_CHECKPOINT_MIN);
   const checkpointMax = toInt("checkpoint-max", values["checkpoint-max"], DEFAULT_CHECKPOINT_MAX);
+  const minimizeBudget = toInt(
+    "minimize-budget",
+    values["minimize-budget"],
+    DEFAULT_MINIMIZE_BUDGET,
+  );
   if (invalid.length > 0) return { ok: false, error: invalid.join("; ") };
+  if (
+    values.minimize !== true &&
+    (values.out !== undefined || values["minimize-budget"] !== undefined)
+  ) {
+    return { ok: false, error: "--out и --minimize-budget имеют смысл только с --minimize" };
+  }
+  if (values.minimize === true && minimizeBudget < 1) {
+    return { ok: false, error: "--minimize-budget must be a positive integer" };
+  }
 
   return {
     ok: true,
@@ -120,6 +144,9 @@ export function parseCliArgs(argv: readonly string[]): ParseResult {
       trace: values.trace,
       quiet: values.quiet ?? false,
       replay: values.replay,
+      minimize: values.minimize ?? false,
+      minimizeBudget,
+      out: values.out,
     },
   };
 }
@@ -153,7 +180,75 @@ function describeEvent(event: Event): string {
   return parts.join(":");
 }
 
-/** Строки отчёта о нарушении (§ 9.3): свойство, шаг, контрольная точка, конфигурация, сообщение, последние события. */
+/** Одна строка о решении для журнала шагов: что именно сделал планировщик. */
+function describeDecision(event: Event): string {
+  switch (event.kind) {
+    case "act": {
+      const intent = event.intent as { type: string; id?: string; target?: string; text?: string };
+      const target = intent.id ?? intent.target;
+      const text = intent.text === undefined ? "" : ` ${JSON.stringify(intent.text)}`;
+      return `act client=${event.client} ${intent.type}${target ? ` ${target}` : ""}${text}`;
+    }
+    case "deliver":
+      return `deliver conn=${event.connection} ${event.direction}`;
+    case "cut":
+    case "serverNotice":
+      return `${event.kind} conn=${event.connection}`;
+    case "connect":
+      return `connect client=${event.client}`;
+    case "reload":
+      return `reload client=${event.client} actor=${event.actorId.slice(0, 8)}…`;
+    case "command":
+      return `command client=${event.client} ${JSON.stringify(event.command)}`;
+    case "storeFault":
+      return `storeFault afterWrites=${event.afterWrites}`;
+    default:
+      return event.kind;
+  }
+}
+
+/** Поля различия клиента из `violation.detail` (S4); остальное CLI печатает как есть. */
+interface ClientDetail {
+  readonly client: number;
+  readonly guest: string;
+  readonly role: string;
+  readonly actor: string;
+  readonly connections: readonly number[];
+  readonly missingInClient: StateDeltaLike;
+  readonly extraInClient: StateDeltaLike;
+}
+interface StateDeltaLike {
+  readonly created: readonly string[];
+  readonly createdCount: number;
+  readonly entries: number;
+  readonly votes: number;
+  readonly unvotes: number;
+}
+
+function isClientDetail(detail: unknown): detail is ClientDetail {
+  return (
+    typeof detail === "object" &&
+    detail !== null &&
+    typeof (detail as ClientDetail).client === "number" &&
+    typeof (detail as ClientDetail).missingInClient === "object"
+  );
+}
+
+function describeDelta(delta: StateDeltaLike): string {
+  const parts: string[] = [];
+  if (delta.createdCount > 0) {
+    const ids = delta.created.map((id) => id.slice(0, 13)).join(", ");
+    parts.push(
+      `created ${delta.createdCount} (${ids}${delta.createdCount > delta.created.length ? ", …" : ""})`,
+    );
+  }
+  if (delta.entries > 0) parts.push(`${delta.entries} entries`);
+  if (delta.votes > 0) parts.push(`${delta.votes} votes`);
+  if (delta.unvotes > 0) parts.push(`${delta.unvotes} unvotes`);
+  return parts.length > 0 ? parts.join(", ") : "—";
+}
+
+/** Строки отчёта о нарушении (§ 9.3): свойство, шаг, контрольная точка, конфигурация, различие клиента, последние события. */
 function printViolation(
   violation: Violation,
   checkpoints: number,
@@ -164,14 +259,58 @@ function printViolation(
     `SIM FAIL ${violation.property} at step ${violation.step}, checkpoint ${checkpoints}`,
   );
   console.error(`  ${label}`);
-  console.error(`  ${violation.message}`);
-  if (violation.detail !== undefined)
-    console.error(`  detail: ${JSON.stringify(violation.detail)}`);
-  console.error(`  last events: ${decisions.slice(-8).map(describeEvent).join(" ")}`);
+  const detail = violation.detail;
+  if (isClientDetail(detail)) {
+    console.error(
+      `  client #${detail.client} (guest ${detail.guest.slice(0, 8)}…, ${detail.role}, actor ${detail.actor.slice(0, 8)}…): X_c ≠ proj_u(X_S)`,
+    );
+    console.error(`    missing in X_c: ${describeDelta(detail.missingInClient)}`);
+    console.error(`    extra in X_c:   ${describeDelta(detail.extraInClient)}`);
+    const mine = new Set(detail.connections);
+    const own = decisions.filter((event) => {
+      if ("client" in event && event.client === detail.client) return true;
+      return "connection" in event && mine.has(event.connection);
+    });
+    console.error(
+      `  last events for client #${detail.client}: ${own.slice(-8).map(describeEvent).join(" ")}`,
+    );
+  } else {
+    console.error(`  ${violation.message}`);
+    if (detail !== undefined) console.error(`  detail: ${JSON.stringify(detail)}`);
+    console.error(`  last events: ${decisions.slice(-8).map(describeEvent).join(" ")}`);
+  }
+}
+
+/**
+ * `--minimize`: ddmin по решениям трассы (§ 9.2, SIM-10 кр. 2) и человекочитаемый журнал шагов
+ * минимальной трассы. Код выхода вызывающего — 1: трасса по-прежнему падает.
+ */
+async function minimizeAndReport(
+  trace: Trace,
+  budget: number,
+  outPath: string,
+  quiet: boolean,
+): Promise<void> {
+  const result = await minimizeTrace(trace, { budget });
+  await mkdir(dirname(outPath), { recursive: true });
+  await writeFile(outPath, serializeTrace(result.trace), "utf8");
+  console.error(
+    `MINIMIZED ${result.property}: ${result.originalDecisions} → ${result.trace.decisions.length} решений, ${result.runs} прогонов, ${result.exhausted ? `бюджет ${budget} исчерпан — 1-минимальность не доказана` : "1-минимальна"}`,
+  );
+  console.error(`  trace:    ${outPath}`);
+  if (quiet) return;
+  console.error("  журнал шагов:");
+  result.trace.decisions.forEach((event, index) => {
+    console.error(`    ${String(index + 1).padStart(3)}. ${describeDecision(event)}`);
+  });
 }
 
 /** `--replay=<trace.json>`: выполняет решения трассы без генератора (§ 9.2, SIM-10 кр. 1). */
-async function replayMain(path: string, quiet: boolean): Promise<number> {
+async function replayMain(
+  path: string,
+  options: { quiet: boolean; minimize: boolean; budget: number; out: string | undefined },
+): Promise<number> {
+  const { quiet } = options;
   let text: string;
   try {
     text = await readFile(path, "utf8");
@@ -217,7 +356,19 @@ async function replayMain(path: string, quiet: boolean): Promise<number> {
       `${label} (replay ${path}; ${counts})`,
       trace.decisions,
     );
+    if (options.minimize) {
+      await minimizeAndReport(
+        trace,
+        options.budget,
+        options.out ?? `${path.replace(/\.json$/, "")}.min.json`,
+        quiet,
+      );
+    }
     return 1;
+  }
+  if (options.minimize) {
+    console.error("sim: трасса не падает — минимизировать нечего");
+    return 2;
   }
   console.log(`REPLAY OK ${label} ${counts} time=${elapsed}`);
   if (!quiet && result.skipped > 0) {
@@ -233,7 +384,14 @@ export async function main(argv: readonly string[]): Promise<number> {
     return 2;
   }
   const { quiet } = parsed.args;
-  if (parsed.args.replay !== undefined) return replayMain(parsed.args.replay, quiet);
+  if (parsed.args.replay !== undefined) {
+    return replayMain(parsed.args.replay, {
+      quiet,
+      minimize: parsed.args.minimize,
+      budget: parsed.args.minimizeBudget,
+      out: parsed.args.out,
+    });
+  }
 
   const seed = parsed.args.seed ?? randomSeed();
   // § 11.1: seed печатается первой строкой; при --quiet он входит в итоговую строку.
@@ -312,7 +470,17 @@ export async function main(argv: readonly string[]): Promise<number> {
     `  repro:    npm run sim -- --profile=${config.profile.name} --clients=${config.clients} --ops=${config.ops} --seed=${seed}`,
   );
   await writeTrace(tracePath);
-  console.error(`  trace:    ${tracePath}`);
+  console.error(
+    `  trace:    ${tracePath}${parsed.args.minimize ? "" : "    minimize: add --minimize"}`,
+  );
+  if (parsed.args.minimize) {
+    await minimizeAndReport(
+      trace,
+      parsed.args.minimizeBudget,
+      parsed.args.out ?? `${tracePath.replace(/\.json$/, "")}.min.json`,
+      quiet,
+    );
+  }
   return 1;
 }
 

@@ -99,6 +99,30 @@ describe("CLI § 11.1: --replay", () => {
   });
 });
 
+describe("CLI § 9.2: флаги минимизации", () => {
+  it("CLI § 9.2: --out и --minimize-budget имеют смысл только с --minimize", () => {
+    expect(parseCliArgs(["--out=x.json"]).ok).toBe(false);
+    expect(parseCliArgs(["--minimize-budget=10"]).ok).toBe(false);
+    const parsed = parseCliArgs([
+      "--replay=t.json",
+      "--minimize",
+      "--minimize-budget=10",
+      "--out=m.json",
+    ]);
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) {
+      expect(parsed.args).toMatchObject({ minimize: true, minimizeBudget: 10, out: "m.json" });
+    }
+  });
+
+  it("CLI § 9.2: бюджет минимизации по умолчанию — 2000 прогонов, ноль и мусор отвергаются", () => {
+    const parsed = parseCliArgs(["--replay=t.json", "--minimize"]);
+    expect(parsed.ok && parsed.args.minimizeBudget).toBe(2000);
+    expect(parseCliArgs(["--replay=t.json", "--minimize", "--minimize-budget=0"]).ok).toBe(false);
+    expect(parseCliArgs(["--replay=t.json", "--minimize", "--minimize-budget=1e3"]).ok).toBe(false);
+  });
+});
+
 describe("CLI § 11.1: прогон и коды выхода", () => {
   it("CLI § 11.1: успешный прогон — код 0, seed первой строкой, итоговая строка и сводка", async () => {
     const code = await main(["--clients=3", "--ops=40", "--seed=11"]);
