@@ -28,7 +28,12 @@ export type Event =
       readonly commandId: string;
     }
   | { readonly kind: "snapshot" }
-  | { readonly kind: "storeFault"; readonly afterWrites: number };
+  | { readonly kind: "storeFault"; readonly afterWrites: number }
+  /**
+   * Не событие мира, а отметка в трассе: здесь была контрольная точка (после досылки). Без неё
+   * `--replay` не знал бы, где выполнять проверки покоя (S4–S8) и оценивать исход досылки (S9).
+   */
+  | { readonly kind: "checkpoint" };
 
 export type EventMode = "run" | "drain";
 
@@ -45,7 +50,7 @@ export type Candidate =
   | { readonly kind: "act"; readonly client: number }
   | { readonly kind: "command"; readonly client: number }
   | { readonly kind: "reload"; readonly client: number }
-  | Exclude<Event, { readonly kind: "act" | "command" | "reload" }>;
+  | Exclude<Event, { readonly kind: "act" | "command" | "reload" | "checkpoint" }>;
 
 /**
  * Все события, разрешённые сейчас, в фиксированном порядке (§ 6 проекта: по
@@ -191,4 +196,55 @@ export function resolveCandidate(
     return { kind: "storeFault", afterWrites: selection.int(0, 1) };
   }
   return candidate;
+}
+
+/**
+ * Можно ли выполнить записанное решение в текущем мире (docs/spec/simulator.md § 9.2:
+ * неприменимое пропускается и считается — так работает минимизация, удалившая часть
+ * предпосылок). Условия те же, что у `enabledEvents`, кроме бюджета `--ops`, который при
+ * воспроизведении не действует: трасса — то, что было выполнено.
+ */
+export function isApplicable(world: World, event: Event): boolean {
+  switch (event.kind) {
+    case "deliver": {
+      const connection = world.connections[event.connection];
+      if (!connection) return false;
+      if (event.direction === "toClient") {
+        if (connection.toClient.length === 0) return false;
+        return connection.alive || connection.serverClosed;
+      }
+      return connection.alive && connection.toServer.length > 0;
+    }
+    case "cut":
+      return world.connections[event.connection]?.alive === true;
+    case "serverNotice": {
+      const connection = world.connections[event.connection];
+      return connection !== undefined && !connection.alive && connection.noticePending;
+    }
+    case "connect":
+      return world.clients[event.client]?.connection === null;
+    case "reload":
+      return world.clients[event.client] !== undefined;
+    case "act": {
+      const client = world.clients[event.client];
+      const guest = client ? world.guests[client.guestIndex] : undefined;
+      return guest !== undefined && guest.role !== "viewer";
+    }
+    case "command": {
+      const client = world.clients[event.client];
+      const guest = client ? world.guests[client.guestIndex] : undefined;
+      return (
+        client !== undefined &&
+        guest !== undefined &&
+        (guest.role === "owner" || guest.role === "facilitator") &&
+        client.connection !== null &&
+        client.core.inspect().status === "welcomed"
+      );
+    }
+    case "snapshot":
+    case "storeFault":
+      return true;
+    case "checkpoint":
+      return true;
+  }
 }

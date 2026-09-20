@@ -128,7 +128,7 @@ function chooseEvent(
 }
 
 /** `applyEvent` + пошаговые проверки над наблюдением этого шага (S1 инкрементально, S2, S3, S7, S10, S11). */
-async function step(
+export async function step(
   world: World,
   event: Event,
   wellFormedState: WellFormedState,
@@ -165,18 +165,11 @@ async function step(
   return null;
 }
 
-/** Досылка (SIM-07) + проверки, верные только «в покое»: S4, S5, S6, S7 (резидуа), S8, полный S1. */
-async function checkpoint(
-  world: World,
-  streams: Streams,
-  decisions: Event[],
-  wellFormedState: WellFormedState,
-): Promise<Violation | null> {
-  const drainViolation = await drain(world, streams, decisions, (event) =>
-    step(world, event, wellFormedState),
-  );
-  if (drainViolation) return drainViolation;
-
+/**
+ * Проверки, верные только «в покое», после досылки: полный S1, S4, S5, S6, S7 (остатки), S8.
+ * Общие для `runSimulation` и `replayTrace`.
+ */
+export function checkpointChecks(world: World): Violation | null {
   world.stats.checkpoints += 1;
   recordConflictAtCheckpoint(world);
 
@@ -196,6 +189,21 @@ async function checkpoint(
   if (s8) return s8;
 
   return null;
+}
+
+/** Досылка (SIM-07) + проверки покоя. В трассу пишется отметка `checkpoint` — и когда досылка упала на S9. */
+async function checkpoint(
+  world: World,
+  streams: Streams,
+  decisions: Event[],
+  wellFormedState: WellFormedState,
+): Promise<Violation | null> {
+  const drainViolation = await drain(world, streams, decisions, (event) =>
+    step(world, event, wellFormedState),
+  );
+  decisions.push({ kind: "checkpoint" });
+  if (drainViolation) return drainViolation;
+  return checkpointChecks(world);
 }
 
 function ok(decisions: readonly Event[], stats: Stats): RunResult {

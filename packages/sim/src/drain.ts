@@ -82,11 +82,26 @@ export async function drain(
     if (!stillOffline || !progressed || deliveries >= budget) break;
   }
 
+  return drainResidue(world, budget);
+}
+
+/**
+ * Остаток после досылки (SIM-07, S9): каналы пусты и ни у кого нет неотвеченных дельт. Общая для
+ * `drain` (тогда известен бюджет `B`) и для воспроизведения трассы, где досылка уже записана
+ * решениями и остаётся лишь проверить, чем она кончилась.
+ */
+export function drainResidue(world: World, budget?: number): Violation | null {
   const channelsNonEmpty = world.connections.some(
     (c) => c.toServer.length > 0 || c.toClient.length > 0,
   );
   if (channelsNonEmpty) {
-    return violation("S9", world.acts, `досылка не сошлась за B=${budget} доставок`);
+    return violation(
+      "S9",
+      world.acts,
+      budget === undefined
+        ? "досылка не сошлась: каналы не пусты"
+        : `досылка не сошлась за B=${budget} доставок`,
+    );
   }
 
   const pendingNonEmpty = world.clients.some((c) => c.core.inspect().pending.length > 0);
@@ -97,6 +112,5 @@ export async function drain(
       "каналы опустели, но P(u) ≠ ∅ у кого-то из клиентов — операция без ответа",
     );
   }
-
   return null;
 }

@@ -7,7 +7,7 @@
 // T-027 (docs/tasks.md § 7.1); здесь эти флаги ещё не разбираются.
 
 import { realpathSync } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
@@ -22,8 +22,10 @@ import {
   type Profile,
 } from "./config.js";
 import type { Event } from "./events.js";
+import { replayTrace } from "./replay.js";
 import { runSimulation } from "./run.js";
-import { createTrace, serializeTrace } from "./trace.js";
+import { createTrace, parseTrace, serializeTrace, TraceError } from "./trace.js";
+import type { Violation } from "./violation.js";
 
 export interface ParsedArgs {
   readonly seed: number | undefined;
@@ -34,6 +36,8 @@ export interface ParsedArgs {
   readonly checkpointMax: number;
   readonly trace: string | undefined;
   readonly quiet: boolean;
+  /** Путь к трассе для `--replay`; в этом режиме флаги прогона не принимаются. */
+  readonly replay: string | undefined;
 }
 
 export type ParseResult =
@@ -49,6 +53,7 @@ const CLI_OPTIONS = {
   "checkpoint-max": { type: "string" },
   trace: { type: "string" },
   quiet: { type: "boolean" },
+  replay: { type: "string" },
 } as const;
 
 /** Разбор `argv` без побочных эффектов — сама случайность (seed по умолчанию) остаётся снаружи, в `main`. */
@@ -69,6 +74,24 @@ export function parseCliArgs(argv: readonly string[]): ParseResult {
 
   // Строго: `Number.parseInt("12abc")` = 12, а `--ops=1e4` = 1 — опечатка в seed давала бы
   // другой, но «валидный» прогон без единого сообщения.
+  if (values.replay !== undefined) {
+    const runFlags = [
+      "seed",
+      "clients",
+      "ops",
+      "profile",
+      "checkpoint-min",
+      "checkpoint-max",
+    ] as const;
+    const given = runFlags.filter((flag) => values[flag] !== undefined);
+    if (given.length > 0) {
+      return {
+        ok: false,
+        error: `--replay берёт конфигурацию из трассы; флаги ${given.map((flag) => `--${flag}`).join(", ")} с ним не сочетаются`,
+      };
+    }
+  }
+
   const invalid: string[] = [];
   const toInt = (flag: string, raw: string | undefined, fallback: number): number => {
     if (raw === undefined) return fallback;
@@ -96,6 +119,7 @@ export function parseCliArgs(argv: readonly string[]): ParseResult {
       checkpointMax,
       trace: values.trace,
       quiet: values.quiet ?? false,
+      replay: values.replay,
     },
   };
 }
@@ -129,6 +153,79 @@ function describeEvent(event: Event): string {
   return parts.join(":");
 }
 
+/** Строки отчёта о нарушении (§ 9.3): свойство, шаг, контрольная точка, конфигурация, сообщение, последние события. */
+function printViolation(
+  violation: Violation,
+  checkpoints: number,
+  label: string,
+  decisions: readonly Event[],
+): void {
+  console.error(
+    `SIM FAIL ${violation.property} at step ${violation.step}, checkpoint ${checkpoints}`,
+  );
+  console.error(`  ${label}`);
+  console.error(`  ${violation.message}`);
+  if (violation.detail !== undefined)
+    console.error(`  detail: ${JSON.stringify(violation.detail)}`);
+  console.error(`  last events: ${decisions.slice(-8).map(describeEvent).join(" ")}`);
+}
+
+/** `--replay=<trace.json>`: выполняет решения трассы без генератора (§ 9.2, SIM-10 кр. 1). */
+async function replayMain(path: string, quiet: boolean): Promise<number> {
+  let text: string;
+  try {
+    text = await readFile(path, "utf8");
+  } catch (error) {
+    console.error(
+      `sim: не удалось прочитать трассу ${path}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return 2;
+  }
+  let trace: ReturnType<typeof parseTrace>;
+  try {
+    trace = parseTrace(text);
+  } catch (error) {
+    if (error instanceof TraceError) {
+      console.error(`sim: ${error.message}`);
+      return 2;
+    }
+    throw error;
+  }
+
+  const label = `seed=${trace.seed} profile=${trace.config.profile} clients=${trace.config.clients} ops=${trace.config.ops}`;
+  const started = Date.now();
+  let result: Awaited<ReturnType<typeof replayTrace>>;
+  try {
+    result = await replayTrace(trace);
+  } catch (error) {
+    if (error instanceof TraceError) {
+      console.error(`sim: ${error.message}`);
+      return 2;
+    }
+    console.error(
+      `sim: внутренняя ошибка при воспроизведении (${label}): ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`,
+    );
+    return 2;
+  }
+  const elapsed = formatSeconds(Date.now() - started);
+  const counts = `решений=${trace.decisions.length} выполнено=${result.applied} пропущено=${result.skipped}`;
+
+  if (result.violation) {
+    printViolation(
+      result.violation,
+      result.stats.checkpoints,
+      `${label} (replay ${path}; ${counts})`,
+      trace.decisions,
+    );
+    return 1;
+  }
+  console.log(`REPLAY OK ${label} ${counts} time=${elapsed}`);
+  if (!quiet && result.skipped > 0) {
+    console.log(`  пропущено решений, неприменимых в этом мире: ${result.skipped} (§ 9.2)`);
+  }
+  return 0;
+}
+
 export async function main(argv: readonly string[]): Promise<number> {
   const parsed = parseCliArgs(argv);
   if (!parsed.ok) {
@@ -136,6 +233,7 @@ export async function main(argv: readonly string[]): Promise<number> {
     return 2;
   }
   const { quiet } = parsed.args;
+  if (parsed.args.replay !== undefined) return replayMain(parsed.args.replay, quiet);
 
   const seed = parsed.args.seed ?? randomSeed();
   // § 11.1: seed печатается первой строкой; при --quiet он входит в итоговую строку.
@@ -209,14 +307,7 @@ export async function main(argv: readonly string[]): Promise<number> {
 
   const { violation } = result;
   const tracePath = parsed.args.trace ?? `.sim/fail-${seed}.json`;
-  console.error(
-    `SIM FAIL ${violation.property} at step ${violation.step}, checkpoint ${stats.checkpoints}`,
-  );
-  console.error(`  ${label}`);
-  console.error(`  ${violation.message}`);
-  if (violation.detail !== undefined)
-    console.error(`  detail: ${JSON.stringify(violation.detail)}`);
-  console.error(`  last events: ${result.decisions.slice(-8).map(describeEvent).join(" ")}`);
+  printViolation(violation, stats.checkpoints, label, result.decisions);
   console.error(
     `  repro:    npm run sim -- --profile=${config.profile.name} --clients=${config.clients} --ops=${config.ops} --seed=${seed}`,
   );
