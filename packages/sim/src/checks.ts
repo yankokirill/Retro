@@ -482,15 +482,10 @@ export function checkNoAuthorLeak(
 ): Violation | null {
   if (observation.phaseAtSend !== "collect") return null;
 
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(observation.raw);
-  } catch {
-    return null; // невалидный JSON — дело S11, не S10.
-  }
-  const result = serverMessageSchema.safeParse(parsed);
-  if (!result.success) return null; // невалидная схема — дело S11, не S10.
-  const message = result.data;
+  const attempt = parseServerMessage(observation.raw);
+  if (!attempt.json) return null; // невалидный JSON — дело S11, не S10.
+  if (!attempt.result.success) return null; // невалидная схема — дело S11, не S10.
+  const message = attempt.result.data;
 
   const deltas: WireDelta[] = [];
   if (message.type === "op") deltas.push(message.delta);
@@ -514,6 +509,30 @@ export function checkNoAuthorLeak(
   return null;
 }
 
+type ServerParse =
+  | { readonly json: false }
+  | { readonly json: true; readonly result: ReturnType<typeof serverMessageSchema.safeParse> };
+
+// Разбор сообщений сервера — чистая функция строки; одну и ту же строку сервер
+// рассылает нескольким клиентам, а S10 и S11 разбирают её по разу на получателя.
+// Кэш ограничен: при переполнении сбрасывается целиком.
+const serverParseCache = new Map<string, ServerParse>();
+const SERVER_PARSE_CACHE_LIMIT = 4000;
+
+function parseServerMessage(raw: string): ServerParse {
+  const cached = serverParseCache.get(raw);
+  if (cached) return cached;
+  let entry: ServerParse;
+  try {
+    entry = { json: true, result: serverMessageSchema.safeParse(JSON.parse(raw)) };
+  } catch {
+    entry = { json: false };
+  }
+  if (serverParseCache.size >= SERVER_PARSE_CACHE_LIMIT) serverParseCache.clear();
+  serverParseCache.set(raw, entry);
+  return entry;
+}
+
 // ---------------------------------------------------------------------------
 // S11 — каждое сообщение проходит соответствующую схему; «клиент → сервер»
 // дополнительно ограничено 16 KiB (ВС-5 simulator.md § 13 — лимит только на входящие).
@@ -530,14 +549,26 @@ export function checkMessageSchema(
   raw: string,
   step: number,
 ): Violation | null {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return violation("S11", step, `сообщение (${direction}) не является валидным JSON`);
+  let result:
+    | { readonly success: true }
+    | {
+        readonly success: false;
+        readonly error: { readonly issues: readonly { readonly message: string }[] };
+      };
+  if (direction === "toClient") {
+    const attempt = parseServerMessage(raw);
+    if (!attempt.json)
+      return violation("S11", step, `сообщение (${direction}) не является валидным JSON`);
+    result = attempt.result;
+  } else {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return violation("S11", step, `сообщение (${direction}) не является валидным JSON`);
+    }
+    result = clientMessageSchema.safeParse(parsed);
   }
-  const schema = direction === "toServer" ? clientMessageSchema : serverMessageSchema;
-  const result = schema.safeParse(parsed);
   if (!result.success) {
     return violation(
       "S11",

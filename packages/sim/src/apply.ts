@@ -5,8 +5,8 @@
 // комментарий в run.ts к `step`).
 
 import { createMemoryOutboxStore, createSyncClient, type Intent } from "@retro/client-core";
-import type { EntityId } from "@retro/crdt";
-import { serverMessageSchema } from "@retro/protocol";
+import type { Dot, EntityId } from "@retro/crdt";
+import type { RejectReason } from "@retro/protocol";
 import type { OpRow } from "@retro/server-core";
 import type {
   AckObservation,
@@ -170,8 +170,9 @@ async function applyDeliverToServer(
       : undefined;
     if (recipientGuestId) outgoing.push({ raw: out.raw, recipientGuestId, phaseAtSend });
 
-    const parsed = serverMessageSchema.safeParse(JSON.parse(out.raw));
-    if (parsed.success && parsed.data.type === "error" && parsed.data.reason === "forbidden") {
+    // Только «error forbidden» после E9: схему проверяет S11, здесь достаточно полей.
+    const sent = JSON.parse(out.raw) as { type?: string; reason?: string };
+    if (sent.type === "error" && sent.reason === "forbidden") {
       rejects.push({ kind: "error", afterStoreFault: world.pendingStoreFault });
       world.pendingStoreFault = false;
     }
@@ -212,35 +213,39 @@ function applyDeliverToClient(world: World, connectionIndex: number): StepObserv
   const acks: AckObservation[] = [];
   const rejects: (RejectObservation | ErrorObservation)[] = [];
 
-  const parsed = serverMessageSchema.safeParse(JSON.parse(raw));
-  if (parsed.success) {
-    const message = parsed.data;
-    if (message.type === "ack") {
-      const match = pendingBefore.find(
-        (p) => p.dot.actor === message.dot.actor && p.dot.counter === message.dot.counter,
-      );
-      acks.push({
-        seq: message.seq,
-        dot: message.dot,
-        kind: match?.kind ?? "op",
-        target: match?.kind === "unvote" ? match.delta.unvotes[0]?.target : undefined,
-      });
-    } else if (message.type === "reject") {
-      const wasPending = pendingBefore.some(
-        (p) => p.dot.actor === message.dot.actor && p.dot.counter === message.dot.counter,
-      );
-      rejects.push({
-        kind: "reject",
-        dot: message.dot,
-        reason: message.reason,
-        wasPending,
-        logGrew: false,
-      });
-    }
+  // Схему сообщения проверяет S11 при постановке в канал, ядро клиента валидирует
+  // входящее само — здесь достаточно полей для наблюдений.
+  const message = JSON.parse(raw) as {
+    type?: string;
+    dot: Dot;
+    seq: number;
+    reason: RejectReason;
+  };
+  if (message.type === "ack") {
+    const match = pendingBefore.find(
+      (p) => p.dot.actor === message.dot.actor && p.dot.counter === message.dot.counter,
+    );
+    acks.push({
+      seq: message.seq,
+      dot: message.dot,
+      kind: match?.kind ?? "op",
+      target: match?.kind === "unvote" ? match.delta.unvotes[0]?.target : undefined,
+    });
+  } else if (message.type === "reject") {
+    const wasPending = pendingBefore.some(
+      (p) => p.dot.actor === message.dot.actor && p.dot.counter === message.dot.counter,
+    );
+    rejects.push({
+      kind: "reject",
+      dot: message.dot,
+      reason: message.reason,
+      wasPending,
+      logGrew: false,
+    });
   }
 
   const replies = client.core.receive(raw);
-  if (parsed.success && parsed.data.type === "error") {
+  if (message.type === "error") {
     // error приходит перед закрытием соединения сервером: клиент уходит в офлайн
     client.core.disconnected();
     client.connection = null;
