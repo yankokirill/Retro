@@ -8,6 +8,7 @@
 import type { Intent } from "@retro/client-core";
 import type { Command } from "@retro/protocol";
 import { generateCommand, generateIntent } from "./intents.js";
+import type { Connection } from "./network.js";
 import type { Prng } from "./prng.js";
 import type { World } from "./world.js";
 
@@ -49,16 +50,49 @@ export type Candidate =
  * (snapshot) в процедуре досылки не участвует вовсе — она не входит в
  * перечисленные там 4 шага.
  */
+/**
+ * Соединения, с которыми что-то ещё может произойти: живые, с непустым каналом или
+ * с не снятым E4. Остальные (порвались, дочитаны, сервер узнал) уже не вернутся;
+ * обходить их на каждом шаге — O(число соединений за прогон) на шаг.
+ */
+const openConnections = new WeakMap<World, { seen: number; indexes: number[] }>();
+
+function isFinished(connection: Connection): boolean {
+  return (
+    !connection.alive &&
+    !connection.noticePending &&
+    connection.toClient.length === 0 &&
+    connection.toServer.length === 0
+  );
+}
+
+function openConnectionIndexes(world: World): readonly number[] {
+  let entry = openConnections.get(world);
+  if (!entry) {
+    entry = { seen: 0, indexes: [] };
+    openConnections.set(world, entry);
+  }
+  for (; entry.seen < world.connections.length; entry.seen++) entry.indexes.push(entry.seen);
+  entry.indexes = entry.indexes.filter((index) => {
+    const connection = world.connections[index];
+    return connection !== undefined && !isFinished(connection);
+  });
+  return entry.indexes;
+}
+
 export function enabledEvents(world: World, mode: EventMode): readonly Candidate[] {
   const events: Candidate[] = [];
+  const open = openConnectionIndexes(world);
 
-  world.connections.forEach((connection, connectionIndex) => {
+  for (const connectionIndex of open) {
+    const connection = world.connections[connectionIndex];
+    if (!connection) continue;
     if (!connection.alive) {
       // закрытое сервером соединение: клиент ещё дочитывает уже поставленное
       if (connection.serverClosed && connection.toClient.length > 0) {
         events.push({ kind: "deliver", connection: connectionIndex, direction: "toClient" });
       }
-      return;
+      continue;
     }
     if (connection.toServer.length > 0) {
       events.push({ kind: "deliver", connection: connectionIndex, direction: "toServer" });
@@ -66,7 +100,7 @@ export function enabledEvents(world: World, mode: EventMode): readonly Candidate
     if (connection.toClient.length > 0) {
       events.push({ kind: "deliver", connection: connectionIndex, direction: "toClient" });
     }
-  });
+  }
 
   if (mode === "drain") return events;
 
@@ -77,15 +111,18 @@ export function enabledEvents(world: World, mode: EventMode): readonly Candidate
     });
   }
 
-  world.connections.forEach((connection, connectionIndex) => {
-    if (connection.alive) events.push({ kind: "cut", connection: connectionIndex });
-  });
+  for (const connectionIndex of open) {
+    if (world.connections[connectionIndex]?.alive) {
+      events.push({ kind: "cut", connection: connectionIndex });
+    }
+  }
 
-  world.connections.forEach((connection, connectionIndex) => {
-    if (!connection.alive && connection.noticePending) {
+  for (const connectionIndex of open) {
+    const connection = world.connections[connectionIndex];
+    if (connection && !connection.alive && connection.noticePending) {
       events.push({ kind: "serverNotice", connection: connectionIndex });
     }
-  });
+  }
 
   world.clients.forEach((client, clientIndex) => {
     if (client.connection === null) events.push({ kind: "connect", client: clientIndex });

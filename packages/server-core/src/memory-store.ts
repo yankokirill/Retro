@@ -47,6 +47,16 @@ export interface MemoryBoardStore extends BoardStore {
   /** Сырые строки журнала доски, по возрастанию `seq` — для оракула симулятора. */
   log(boardId: string): readonly OpRow[];
   /**
+   * Дешёвые аналоги `log()` для симулятора (T-005): `log()` копирует весь журнал,
+   * а проверкам на каждое сообщение нужны число строк, хвост и строка по `seq`.
+   * Журнал только дописывается, `seq` по возрастанию.
+   */
+  logSize(boardId: string): number;
+  /** Строки журнала начиная с позиции `index` (0 — весь журнал). */
+  logFrom(boardId: string, index: number): readonly OpRow[];
+  /** Строка журнала с данным `seq` или `null` (двоичный поиск). */
+  opRowSync(boardId: string, seq: number): OpRow | null;
+  /**
    * Синхронный аналог `board()` — только у адаптера в памяти (у Postgres
    * такого не может быть, поэтому вне порта `BoardStore`). Нужен
    * `packages/sim`: `checks.ts` объявлен синхронным (S2/S3/S4/... — не
@@ -245,6 +255,23 @@ class MemoryBoardStoreImpl implements MemoryBoardStore {
   log(boardId: string): readonly OpRow[] {
     const entry = this.getEntry(boardId);
     return entry ? entry.rows.map(toOpRow) : [];
+  }
+
+  logSize(boardId: string): number {
+    return this.getEntry(boardId)?.rows.length ?? 0;
+  }
+
+  logFrom(boardId: string, index: number): readonly OpRow[] {
+    const entry = this.getEntry(boardId);
+    return entry ? entry.rows.slice(index).map(toOpRow) : [];
+  }
+
+  opRowSync(boardId: string, seq: number): OpRow | null {
+    const rows = this.getEntry(boardId)?.rows;
+    if (!rows) return null;
+    const index = firstIndexAfter(rows, seq - 1);
+    const row = rows[index];
+    return row && row.seq === seq ? toOpRow(row) : null;
   }
 
   // --- Порт BoardStore: чтение -----------------------------------------

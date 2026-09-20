@@ -59,9 +59,23 @@ function findClientByConnection(world: World, connectionIndex: number): ClientSt
   return world.clients.find((c) => c.connection === connectionIndex);
 }
 
-function lastSeqOf(rows: readonly OpRow[]): number {
-  const last = rows[rows.length - 1];
-  return last ? last.seq : 0;
+/**
+ * Поля сообщения сервера, нужные учёту. `welcome` может весить сотни килобайт, а нужно
+ * знать только «со снапшотом или нет» — поле `snapshot` идёт сразу после малого `meta`,
+ * так что хватает поиска в начале строки, без разбора всего JSON.
+ */
+function sentFactsOf(raw: string): SentFacts {
+  if (raw.startsWith('{"type":"welcome"')) {
+    const head = raw.slice(0, 4096);
+    return { type: "welcome", snapshot: head.includes('"snapshot":null') ? null : {} };
+  }
+  return JSON.parse(raw) as SentFacts;
+}
+
+/** Индекс соединения по id (`conn-<индекс>`, см. applyConnect) — O(1) вместо линейного поиска. */
+function connectionIndexOf(world: World, id: string): number {
+  const index = Number(id.slice("conn-".length));
+  return world.connections[index]?.id === id ? index : -1;
 }
 
 export async function applyEvent(world: World, event: Event, prng: Prng): Promise<StepObservation> {
@@ -141,11 +155,10 @@ async function applyDeliverToServer(
   const raw = connection.toServer.shift();
   if (raw === undefined) return EMPTY;
 
-  const beforeSeq = lastSeqOf(world.store.log(world.boardId));
+  const rowsBefore = world.store.logSize(world.boardId);
   const phaseBefore = world.store.boardSync(world.boardId)?.phase ?? "collect";
   const result = await world.server.receive(connection.id, raw);
-  const afterRows = world.store.log(world.boardId);
-  const newLogRows = afterRows.filter((r) => r.seq > beforeSeq);
+  const newLogRows = world.store.logFrom(world.boardId, rowsBefore);
   // Фаза ПОСЛЕ receive(), не до: setPhase и рассылка catch-up-строк reveal
   // происходят внутри одного и того же вызова (handlers/command.ts —
   // sendRevealCatchup вызывается сразу после обновления фазы), поэтому
@@ -159,9 +172,9 @@ async function applyDeliverToServer(
   const sentFacts: SentFacts[] = [];
 
   for (const out of result.outgoing) {
-    const sent = JSON.parse(out.raw) as SentFacts;
+    const sent = sentFactsOf(out.raw);
     sentFacts.push(sent);
-    const targetIndex = world.connections.findIndex((c) => c.id === out.to);
+    const targetIndex = connectionIndexOf(world, out.to);
     if (targetIndex === -1) continue;
     const target = world.connections[targetIndex];
     if (!target || !target.alive) {
@@ -195,7 +208,7 @@ async function applyDeliverToServer(
   });
 
   for (const closeId of result.close) {
-    const idx = world.connections.findIndex((c) => c.id === closeId);
+    const idx = connectionIndexOf(world, closeId);
     const target = idx === -1 ? undefined : world.connections[idx];
     if (target) {
       target.alive = false;
@@ -231,7 +244,8 @@ function applyDeliverToClient(world: World, connectionIndex: number): StepObserv
 
   // Схему сообщения проверяет S11 при постановке в канал, ядро клиента валидирует
   // входящее само — здесь достаточно полей для наблюдений.
-  const message = JSON.parse(raw) as {
+  // `welcome` (может весить сотни КБ) для этих наблюдений не нужен — не разбираем его.
+  const message = (raw.startsWith('{"type":"welcome"') ? { type: "welcome" } : JSON.parse(raw)) as {
     type?: string;
     dot: Dot;
     seq: number;

@@ -91,12 +91,28 @@ export const MIN_CLIENTS = 2;
 export const MAX_CLIENTS = 20;
 export const DEFAULT_CLIENTS = 5;
 export const DEFAULT_OPS = 10_000;
+/**
+ * До скольких действий прогон идёт «как есть»; дальше события с полной стоимостью
+ * O(состояния) редеют, чтобы время прогона росло линейно от `--ops`, а не квадратично:
+ * вес E6 умножается на `min(1, LONG_RUN_ACTS / действий)` (перезагрузка = `welcome` со
+ * всем состоянием), а шаг контрольных точек не меньше `действий / CHECKPOINT_SPACING_DIVISOR`
+ * (контрольная точка сравнивает состояния целиком). Матрица `test:sim` (≤ 1500 оп) не затронута.
+ */
+export const LONG_RUN_ACTS = 1500;
+export const CHECKPOINT_SPACING_DIVISOR = 8;
+
 export const DEFAULT_CHECKPOINT_MIN = 200;
 export const DEFAULT_CHECKPOINT_MAX = 800;
 export const DEFAULT_PROFILE_NAME: Profile = "default";
 
-/** Версия формата трассы/планировщика (§ 6 проекта, § 9.1 спецификации). Меняется вместе с `prng.ts`/порядком `enabledEvents`. */
-export const TRACE_VERSION = 1;
+/**
+ * Версия формата трассы/планировщика (§ 6 проекта, § 9.1 спецификации). Меняется вместе с
+ * `prng.ts`/порядком `enabledEvents`/выбором цели генератором.
+ * 2 — цель выбирается выборкой из состояния клиента (а не из view), порядок обхода таблиц
+ * состояния — по хешу (персистентные таблицы `crdt`), вес E6/E8 и шаг контрольных точек зависят
+ * от числа выполненных действий (`LONG_RUN_ACTS`).
+ */
+export const TRACE_VERSION = 2;
 
 const BASE_EVENTS: EventWeights = {
   act: 30,

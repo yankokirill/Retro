@@ -95,8 +95,7 @@ export interface AckObservation {
 }
 
 export function checkAck(world: World, ack: AckObservation, step: number): Violation | null {
-  const rows = world.store.log(world.boardId);
-  const row = rows.find((r) => r.seq === ack.seq);
+  const row = world.store.opRowSync(world.boardId, ack.seq);
   if (!row) {
     return violation("S3", step, `ack ссылается на seq=${ack.seq}, которого нет в журнале`);
   }
@@ -119,8 +118,21 @@ export function checkAck(world: World, ack: AckObservation, step: number): Viola
     }
   }
 
-  const seenOpKeys = new Set<string>();
-  for (const r of rows) {
+  return checkNoDuplicateOps(world, step);
+}
+
+/** Уже просмотренная часть журнала каждого хранилища: дубли ищем только среди новых строк. */
+const journalScan = new WeakMap<object, { scanned: number; keys: Set<string> }>();
+
+/** В журнале нет двух строк с одинаковым `(actor, counter)` операции (идемпотентность, V1). */
+function checkNoDuplicateOps(world: World, step: number): Violation | null {
+  let scan = journalScan.get(world.store);
+  if (!scan) {
+    scan = { scanned: 0, keys: new Set() };
+    journalScan.set(world.store, scan);
+  }
+  for (const r of world.store.logFrom(world.boardId, scan.scanned)) {
+    scan.scanned += 1;
     const isUnvoteOnly =
       r.delta.unvotes.length > 0 &&
       r.delta.entries.length === 0 &&
@@ -129,10 +141,10 @@ export function checkAck(world: World, ack: AckObservation, step: number): Viola
     if (isUnvoteOnly) continue;
     const d = operationDot(r.delta);
     const key = `${d.actor}:${d.counter}`;
-    if (seenOpKeys.has(key)) {
+    if (scan.keys.has(key)) {
       return violation("S3", step, `в журнале две строки с одинаковым (actor,counter)=${key}`);
     }
-    seenOpKeys.add(key);
+    scan.keys.add(key);
   }
   return null;
 }
@@ -210,11 +222,24 @@ export function checkScreensAgree(world: World, step: number): Violation | null 
 
 export function checkAckedOpsPersist(world: World, step: number): Violation | null {
   const xs = world.oracle.x;
+  // Индексы X_S — один раз на вызов: поиск `[...xs.x.values()].some(...)` на каждый
+  // элемент confirmed давал O(n²) на контрольную точку.
+  const createdIds = new Set<string>();
+  for (const c of xs.created.values()) createdIds.add(c.id);
+  const entryKeys = new Set<string>();
+  for (const e of xs.entries.values()) {
+    entryKeys.add(`${e.key.entity}|${e.key.field}|${dotKey(e.dot)}`);
+  }
+  const voteDots = new Set<string>();
+  for (const v of xs.votes.values()) voteDots.add(dotKey(v.dot));
+  const unvoteKeys = new Set<string>();
+  for (const u of xs.unvotes.values()) unvoteKeys.add(`${dotKey(u.dot)}|${u.target}`);
+
   for (const client of world.clients) {
     const guest = world.guests[client.guestIndex];
     const confirmed = client.core.inspect().confirmed;
     for (const created of confirmed.created.values()) {
-      if (![...xs.created.values()].some((c) => c.id === created.id)) {
+      if (!createdIds.has(created.id)) {
         return violation(
           "S6",
           step,
@@ -223,13 +248,7 @@ export function checkAckedOpsPersist(world: World, step: number): Violation | nu
       }
     }
     for (const entry of confirmed.entries.values()) {
-      const present = [...xs.entries.values()].some(
-        (e) =>
-          e.key.entity === entry.key.entity &&
-          e.key.field === entry.key.field &&
-          dotKey(e.dot) === dotKey(entry.dot),
-      );
-      if (!present) {
+      if (!entryKeys.has(`${entry.key.entity}|${entry.key.field}|${dotKey(entry.dot)}`)) {
         return violation(
           "S6",
           step,
@@ -238,8 +257,7 @@ export function checkAckedOpsPersist(world: World, step: number): Violation | nu
       }
     }
     for (const vote of confirmed.votes.values()) {
-      const present = [...xs.votes.values()].some((v) => dotKey(v.dot) === dotKey(vote.dot));
-      if (!present) {
+      if (!voteDots.has(dotKey(vote.dot))) {
         return violation(
           "S6",
           step,
@@ -248,10 +266,7 @@ export function checkAckedOpsPersist(world: World, step: number): Violation | nu
       }
     }
     for (const unvote of confirmed.unvotes.values()) {
-      const present = [...xs.unvotes.values()].some(
-        (u) => dotKey(u.dot) === dotKey(unvote.dot) && u.target === unvote.target,
-      );
-      if (!present) {
+      if (!unvoteKeys.has(`${dotKey(unvote.dot)}|${unvote.target}`)) {
         return violation(
           "S6",
           step,

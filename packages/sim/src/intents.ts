@@ -18,8 +18,8 @@
 // без риска: 5 строк соответствия вида намерения виду действия).
 
 import type { Intent } from "@retro/client-core";
-import type { CardView, Color, Column, EntityId, GroupView, View } from "@retro/crdt";
-import { activeVotes, entityKind } from "@retro/crdt";
+import type { Color, Column, EntityId, Kind, State } from "@retro/crdt";
+import { elementAt, entityKind, isVoteActive, winner } from "@retro/crdt";
 import type { Command, Phase } from "@retro/protocol";
 import { checkPermission, checkVotePermission, type StickerAction } from "@retro/server-core";
 import type { Prng } from "./prng.js";
@@ -42,46 +42,39 @@ function pickOne<T>(prng: Prng, items: readonly T[]): T {
   return item;
 }
 
-/** С вероятностью `hot` — из последних затронутых сущностей (если это пересекается с кандидатами); иначе равномерно (§ 5.1). */
-function pickTarget(
+/** Сколько раз выборка пробует случайную сущность, прежде чем сдаться («подходящих нет»). */
+const SAMPLE_TRIES = 24;
+
+/** Проверка пригодности сущности как цели; вид известен из `created`. */
+type Accept = (id: EntityId, kind: Kind) => boolean;
+
+/**
+ * Случайная подходящая цель из состояния клиента. С вероятностью `hot` — из последних
+ * затронутых сущностей (§ 5.1), иначе равномерная выборка из `created` с отбраковкой:
+ * O(SAMPLE_TRIES · log n) вместо построения полного view (O(n) на каждое действие).
+ * `created` клиента — ровно то, что он знает (свои неподтверждённые создания тоже,
+ * чужие скрытые стикеры до reveal — нет), так что «видимость» сохраняется.
+ */
+function pickEntity(
   prng: Prng,
-  candidates: readonly EntityId[],
+  state: State,
   hot: number,
   recent: readonly EntityId[],
+  accept: Accept,
 ): EntityId | undefined {
-  if (candidates.length === 0) return undefined;
-  const hotPool = candidates.filter((id) => recent.includes(id));
-  if (hotPool.length > 0 && prng.next() < hot) return pickOne(prng, hotPool);
-  return pickOne(prng, candidates);
-}
-
-interface Screen {
-  readonly cards: readonly CardView[];
-  readonly ownCards: readonly CardView[];
-  readonly groups: readonly GroupView[];
-  readonly trash: readonly EntityId[];
-  readonly actions: readonly ActionScreenItem[];
-}
-
-interface ActionScreenItem {
-  readonly id: EntityId;
-}
-
-function buildScreen(world: World, guestId: string, view: View): Screen {
-  const cards: CardView[] = [];
-  const groups: GroupView[] = [];
-  for (const items of view.columns.values()) {
-    for (const item of items) {
-      if ("cards" in item) {
-        groups.push(item);
-        for (const card of item.cards) cards.push(card);
-      } else {
-        cards.push(item);
-      }
-    }
+  if (state.created.size === 0) return undefined;
+  if (recent.length > 0 && prng.next() < hot) {
+    const pool = recent.filter((id) => {
+      const kind = entityKind(state, id);
+      return kind !== undefined && accept(id, kind);
+    });
+    if (pool.length > 0) return pickOne(prng, pool);
   }
-  const ownCards = cards.filter((c) => world.oracle.stickerAuthor.get(c.id) === guestId);
-  return { cards, ownCards, groups, trash: [...view.trash], actions: [...view.actions] };
+  for (let attempt = 0; attempt < SAMPLE_TRIES; attempt++) {
+    const created = elementAt(state.created, prng.int(0, state.created.size - 1));
+    if (created && accept(created.id, created.kind)) return created.id;
+  }
+  return undefined;
 }
 
 /** Намерение → `StickerAction` (только для стикеров — как `classifyAction`, но без готовой дельты). */
@@ -114,12 +107,12 @@ export function generateIntent(world: World, clientIndex: number, prng: Prng): I
   const snapshot = client.core.inspect();
   const phase: Phase = snapshot.meta?.phase ?? "collect";
   const role = guest.role;
-  const screen = buildScreen(world, guest.id, snapshot.view);
+  const state = snapshot.full;
   const profile = world.config.profile;
   const hot = profile.hot;
   const weights = profile.intentWeights[phase] ?? {};
 
-  type Builder = () => Intent;
+  type Builder = () => Intent | null;
   const candidates: [Intent["type"], number, Builder][] = [];
 
   const permitted = (kind: Intent["type"], isOwn: boolean): boolean => {
@@ -129,6 +122,22 @@ export function generateIntent(world: World, clientIndex: number, prng: Prng): I
   };
 
   const weightOf = (kind: Intent["type"]): number => weights[kind] ?? profile.defaultIntentWeight;
+
+  const isDeleted = (id: EntityId): boolean =>
+    winner(state, { entity: id, field: "deleted" })?.value === true;
+  const isOwn = (id: EntityId): boolean => world.oracle.stickerAuthor.get(id) === guest.id;
+  const target = (accept: Accept): EntityId | undefined =>
+    pickEntity(prng, state, hot, world.recent, accept);
+
+  /** Живой стикер, который эта роль может править в этой фазе: чужие — только там, где матрица прав это разрешает. */
+  const stickerScope = (kind: Intent["type"]): Accept | null => {
+    if (permitted(kind, false)) return (id, k) => k === "sticker" && !isDeleted(id);
+    if (permitted(kind, true)) return (id, k) => k === "sticker" && !isDeleted(id) && isOwn(id);
+    return null;
+  };
+  const liveGroup: Accept = (id, k) => k === "group" && !isDeleted(id);
+  const liveAction: Accept = (id, k) => k === "action" && !isDeleted(id);
+  const hasEntities = state.created.size > 0;
 
   if (permitted("createSticker", true)) {
     candidates.push([
@@ -152,68 +161,62 @@ export function generateIntent(world: World, clientIndex: number, prng: Prng): I
     ]);
   }
 
-  // editText/setColor/delete/restore — гейтятся только для СВОИХ стикеров
-  // (isOwn=true в вызове permitted); классификация не знает вида до
-  // выбора цели, поэтому проверяем на "своих" и на "видимых вообще"
-  // раздельно: participant вне collect может редактировать чужой стикер
-  // ТОЛЬКО в group (permitted(..., false) для этой фазы — true у owner/
-  // facilitator всегда, у participant только если checkPermission не
-  // требует владения в этой фазе).
-  const ownIds = screen.ownCards.map((c) => c.id);
-  const anyCardIds = screen.cards.map((c) => c.id);
-
-  const editableIds = permitted("editText", false)
-    ? anyCardIds
-    : permitted("editText", true)
-      ? ownIds
-      : [];
-  if (editableIds.length > 0) {
+  // editText/setColor/delete — гейтятся только для СВОИХ стикеров: участник вне
+  // collect/group не может ничего, а в этих фазах правит лишь свои (матрица прав).
+  const editable = hasEntities ? stickerScope("editText") : null;
+  if (editable) {
     candidates.push([
       "editText",
       weightOf("editText"),
-      () => ({
-        type: "editText",
-        id: mustPick(prng, editableIds, hot, world.recent),
-        text: prng.word(),
-      }),
+      () => {
+        const id = target(editable);
+        return id === undefined ? null : { type: "editText", id, text: prng.word() };
+      },
     ]);
     candidates.push([
       "setColor",
       weightOf("setColor"),
-      () => ({
-        type: "setColor",
-        id: mustPick(prng, editableIds, hot, world.recent),
-        color: pickOne(prng, COLORS),
-      }),
+      () => {
+        const id = target(editable);
+        return id === undefined ? null : { type: "setColor", id, color: pickOne(prng, COLORS) };
+      },
     ]);
     candidates.push([
       "delete",
       weightOf("delete"),
-      () => ({ type: "delete", id: mustPick(prng, editableIds, hot, world.recent) }),
+      () => {
+        const id = target(editable);
+        return id === undefined ? null : { type: "delete", id };
+      },
     ]);
   }
 
-  const moveIds = permitted("move", false) ? anyCardIds : permitted("move", true) ? ownIds : [];
-  if (moveIds.length > 0) {
+  const movable = hasEntities ? stickerScope("move") : null;
+  if (movable) {
     candidates.push([
       "move",
       weightOf("move"),
-      () => ({
-        type: "move",
-        id: mustPick(prng, moveIds, hot, world.recent),
-        place: { column: pickOne(prng, COLUMNS), frac: randomFrac(prng) },
-      }),
+      () => {
+        const id = target(movable);
+        if (id === undefined) return null;
+        return {
+          type: "move",
+          id,
+          place: { column: pickOne(prng, COLUMNS), frac: randomFrac(prng) },
+        };
+      },
     ]);
   }
 
-  if (anyCardIds.length > 0 && permitted("setGroup", false)) {
+  if (hasEntities && permitted("setGroup", false)) {
+    const anySticker: Accept = (id, k) => k === "sticker" && !isDeleted(id);
     candidates.push([
       "setGroup",
       weightOf("setGroup"),
       () => {
-        const id = mustPick(prng, anyCardIds, hot, world.recent);
-        const groupIds = screen.groups.map((g) => g.id);
-        const group = groupIds.length > 0 && prng.next() < 0.7 ? pickOne(prng, groupIds) : null;
+        const id = target(anySticker);
+        if (id === undefined) return null;
+        const group = prng.next() < 0.7 ? (target(liveGroup) ?? null) : null;
         return { type: "setGroup", id, group };
       },
     ]);
@@ -223,22 +226,23 @@ export function generateIntent(world: World, clientIndex: number, prng: Prng): I
   // группы T-011 не гейтит. Участнику предлагаем лишь то, что интерфейс дал бы
   // восстановить — свои стикеры и группы (авторство стикера — по оракулу; у
   // ещё не подтверждённого своего стикера оно неизвестно, его пропускаем).
-  let restorableIds: readonly EntityId[] = screen.trash;
-  if (!permitted("restore", false)) {
-    const canRestoreOwn = permitted("restore", true);
-    restorableIds = screen.trash.filter((id) => {
-      let kind = entityKind(snapshot.confirmed, id);
-      if (kind === undefined) kind = entityKind(snapshot.full, id);
-      if (kind === "group") return true;
-      return canRestoreOwn && world.oracle.stickerAuthor.get(id) === guest.id;
-    });
-  }
-  if (restorableIds.length > 0) {
-    candidates.push([
-      "restore",
-      weightOf("restore"),
-      () => ({ type: "restore", id: mustPick(prng, restorableIds, hot, world.recent) }),
-    ]);
+  if (hasEntities) {
+    const anyRestore = permitted("restore", false);
+    const ownRestore = permitted("restore", true);
+    if (anyRestore || ownRestore) {
+      const restorable: Accept = (id, k) => {
+        if (k === "action" || !isDeleted(id)) return false;
+        return k === "group" || anyRestore || isOwn(id);
+      };
+      candidates.push([
+        "restore",
+        weightOf("restore"),
+        () => {
+          const id = target(restorable);
+          return id === undefined ? null : { type: "restore", id };
+        },
+      ]);
+    }
   }
 
   // createGroup/renameGroup — не гейтится T-011 (classifyAction возвращает
@@ -253,99 +257,98 @@ export function generateIntent(world: World, clientIndex: number, prng: Prng): I
       title: prng.word(),
     }),
   ]);
-  if (screen.groups.length > 0) {
-    const groupIds = screen.groups.map((g) => g.id);
+  if (hasEntities) {
     candidates.push([
       "renameGroup",
       weightOf("renameGroup"),
-      () => ({
-        type: "renameGroup",
-        id: mustPick(prng, groupIds, hot, world.recent),
-        title: prng.word(),
-      }),
+      () => {
+        const id = target(liveGroup);
+        return id === undefined ? null : { type: "renameGroup", id, title: prng.word() };
+      },
     ]);
-  }
 
-  // editAction/assign/setDone — не гейтятся T-011, всегда доступны при наличии цели.
-  if (screen.actions.length > 0) {
-    const actionIds = screen.actions.map((a) => a.id);
+    // editAction/assign/setDone — не гейтятся T-011, всегда доступны при наличии цели.
     candidates.push([
       "editAction",
       weightOf("editAction"),
-      () => ({
-        type: "editAction",
-        id: mustPick(prng, actionIds, hot, world.recent),
-        text: prng.word(),
-      }),
+      () => {
+        const id = target(liveAction);
+        return id === undefined ? null : { type: "editAction", id, text: prng.word() };
+      },
     ]);
     candidates.push([
       "assign",
       weightOf("assign"),
       () => {
+        const id = target(liveAction);
+        if (id === undefined) return null;
         const guestIds = world.guests.map((g) => g.id);
         const assignee = prng.next() < 0.7 && guestIds.length > 0 ? pickOne(prng, guestIds) : null;
-        return {
-          type: "assign",
-          id: mustPick(prng, actionIds, hot, world.recent),
-          guestId: assignee,
-        };
+        return { type: "assign", id, guestId: assignee };
       },
     ]);
     candidates.push([
       "setDone",
       weightOf("setDone"),
-      () => ({
-        type: "setDone",
-        id: mustPick(prng, actionIds, hot, world.recent),
-        done: prng.next() < 0.5,
-      }),
+      () => {
+        const id = target(liveAction);
+        return id === undefined ? null : { type: "setDone", id, done: prng.next() < 0.5 };
+      },
     ]);
   }
 
-  if (snapshot.voterToken !== null && checkVotePermission({ role, phase, action: "vote" }).ok) {
-    const voteTargets = [...anyCardIds, ...screen.groups.map((g) => g.id)];
-    if (voteTargets.length > 0) {
-      candidates.push([
-        "vote",
-        weightOf("vote"),
-        () => ({ type: "vote", target: mustPick(prng, voteTargets, hot, world.recent) }),
-      ]);
-    }
+  if (
+    hasEntities &&
+    snapshot.voterToken !== null &&
+    checkVotePermission({ role, phase, action: "vote" }).ok
+  ) {
+    const votable: Accept = (id, k) => (k === "sticker" || k === "group") && !isDeleted(id);
+    candidates.push([
+      "vote",
+      weightOf("vote"),
+      () => {
+        const id = target(votable);
+        return id === undefined ? null : { type: "vote", target: id };
+      },
+    ]);
   }
 
-  if (snapshot.voterToken !== null && checkVotePermission({ role, phase, action: "unvote" }).ok) {
-    const owned = snapshot.full;
-    const myVotes = activeVotes(owned).filter((v) => v.user === snapshot.voterToken);
-    if (myVotes.length > 0) {
-      candidates.push([
-        "unvote",
-        weightOf("unvote"),
-        () => {
-          const vote = pickOne(prng, myVotes);
-          return { type: "unvote", voteDot: vote.dot, target: vote.target };
-        },
-      ]);
-    }
+  if (
+    state.votes.size > 0 &&
+    snapshot.voterToken !== null &&
+    checkVotePermission({ role, phase, action: "unvote" }).ok
+  ) {
+    const voter = snapshot.voterToken;
+    candidates.push([
+      "unvote",
+      weightOf("unvote"),
+      () => {
+        // Свои ещё не отозванные голоса: равномерная выборка из V⁺ с отбраковкой.
+        for (let attempt = 0; attempt < SAMPLE_TRIES; attempt++) {
+          const vote = elementAt(state.votes, prng.int(0, state.votes.size - 1));
+          if (vote && vote.user === voter && isVoteActive(state, vote)) {
+            return { type: "unvote", voteDot: vote.dot, target: vote.target };
+          }
+        }
+        return null;
+      },
+    ]);
   }
 
-  if (candidates.length === 0) return null;
-  const items: (readonly [Builder, number])[] = candidates.map(([, weight, build]) => [
-    build,
-    weight,
-  ]);
-  const build = prng.pick(items);
-  return build();
-}
-
-function mustPick(
-  prng: Prng,
-  candidates: readonly EntityId[],
-  hot: number,
-  recent: readonly EntityId[],
-): EntityId {
-  const id = pickTarget(prng, candidates, hot, recent);
-  if (id === undefined) throw new Error("mustPick: candidates must be non-empty");
-  return id;
+  // Выбор вида по весам; если у выбранного нет подходящей цели — берём следующий.
+  const remaining = [...candidates];
+  while (remaining.length > 0) {
+    const items: (readonly [Builder, number])[] = remaining.map(([, weight, build]) => [
+      build,
+      weight,
+    ]);
+    const build = prng.pick(items);
+    const intent = build();
+    if (intent) return intent;
+    const index = remaining.findIndex(([, , candidate]) => candidate === build);
+    remaining.splice(index, 1);
+  }
+  return null;
 }
 
 /**

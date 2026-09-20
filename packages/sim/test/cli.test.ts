@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { main, parseCliArgs } from "../src/cli.js";
+import { TRACE_VERSION } from "../src/config.js";
 
 let logs: string[];
 let errors: string[];
@@ -89,7 +90,11 @@ describe("CLI § 11.1: прогон и коды выхода", () => {
       expect(code).toBe(0);
       expect(existsSync(path)).toBe(true);
       const trace = JSON.parse(readFileSync(path, "utf8"));
-      expect(trace).toMatchObject({ version: 1, seed: 5, config: { clients: 3, ops: 20 } });
+      expect(trace).toMatchObject({
+        version: TRACE_VERSION,
+        seed: 5,
+        config: { clients: 3, ops: 20 },
+      });
       expect(Array.isArray(trace.decisions)).toBe(true);
       expect(trace.decisions.length).toBeGreaterThan(0);
     } finally {

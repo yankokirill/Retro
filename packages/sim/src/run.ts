@@ -24,7 +24,7 @@ import {
   checkWellFormedFull,
   checkWellFormedIncremental,
 } from "./checks.js";
-import type { SimConfig } from "./config.js";
+import { CHECKPOINT_SPACING_DIVISOR, LONG_RUN_ACTS, type SimConfig } from "./config.js";
 import { recordConflictAtCheckpoint } from "./coverage.js";
 import { drain } from "./drain.js";
 import { type Candidate, type Event, enabledEvents, resolveCandidate } from "./events.js";
@@ -70,11 +70,14 @@ function eventWeight(world: World, kind: Candidate["kind"]): number {
     case "connect":
       return events.connect;
     case "reload":
-      return events.reload;
+      // перезагрузка = welcome со всем состоянием: в длинных прогонах реже (см. LONG_RUN_ACTS)
+      return events.reload * Math.min(1, LONG_RUN_ACTS / Math.max(world.acts, 1));
     case "command":
       return events.command;
     case "snapshot":
-      return events.snapshot;
+      // снапшот сжимает всё состояние, а свежий снапшот превращает переподключение в
+      // welcome со всем состоянием: в длинных прогонах реже (см. LONG_RUN_ACTS)
+      return events.snapshot * Math.min(1, LONG_RUN_ACTS / Math.max(world.acts, 1));
     case "storeFault":
       return events.storeFault;
   }
@@ -213,7 +216,14 @@ export async function runSimulation(config: SimConfig): Promise<RunResult> {
     if (world.acts >= nextCheckpoint) {
       const violation2 = await checkpoint(world, prng, decisions, wellFormedState);
       if (violation2) return fail(violation2, decisions, world.stats);
-      nextCheckpoint = world.acts + prng.int(config.checkpointMin, config.checkpointMax);
+      // не чаще, чем раз в 1/8 уже выполненных действий: сравнение состояний целиком (S4/S5)
+      // стоит O(состояния), суммарная стоимость проверок должна расти линейно
+      nextCheckpoint =
+        world.acts +
+        Math.max(
+          prng.int(config.checkpointMin, config.checkpointMax),
+          Math.floor(world.acts / CHECKPOINT_SPACING_DIVISOR),
+        );
     }
   }
 
