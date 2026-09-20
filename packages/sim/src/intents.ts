@@ -17,9 +17,9 @@
 // намерение→`StickerAction` сделана заново по той же логике (маленькая,
 // без риска: 5 строк соответствия вида намерения виду действия).
 
-import type { Intent, PendingEntry } from "@retro/client-core";
-import type { CardView, Color, Column, EntityId, GroupView, State, View } from "@retro/crdt";
-import { activeVotes, empty, entityKind, fromWire, merge } from "@retro/crdt";
+import type { Intent } from "@retro/client-core";
+import type { CardView, Color, Column, EntityId, GroupView, View } from "@retro/crdt";
+import { activeVotes, entityKind } from "@retro/crdt";
 import type { Command, Phase } from "@retro/protocol";
 import { checkPermission, checkVotePermission, type StickerAction } from "@retro/server-core";
 import type { Prng } from "./prng.js";
@@ -103,12 +103,6 @@ function stickerActionFor(kind: Intent["type"]): StickerAction | null {
     default:
       return null;
   }
-}
-
-function pendingState(pending: readonly PendingEntry[]): State {
-  let state = empty();
-  for (const entry of pending) state = merge(state, fromWire(entry.delta));
-  return state;
 }
 
 export function generateIntent(world: World, clientIndex: number, prng: Prng): Intent | null {
@@ -232,13 +226,9 @@ export function generateIntent(world: World, clientIndex: number, prng: Prng): I
   let restorableIds: readonly EntityId[] = screen.trash;
   if (!permitted("restore", false)) {
     const canRestoreOwn = permitted("restore", true);
-    let withPending: State | null = null;
     restorableIds = screen.trash.filter((id) => {
       let kind = entityKind(snapshot.confirmed, id);
-      if (kind === undefined) {
-        withPending ??= merge(snapshot.confirmed, pendingState(snapshot.pending));
-        kind = entityKind(withPending, id);
-      }
+      if (kind === undefined) kind = entityKind(snapshot.full, id);
       if (kind === "group") return true;
       return canRestoreOwn && world.oracle.stickerAuthor.get(id) === guest.id;
     });
@@ -324,7 +314,7 @@ export function generateIntent(world: World, clientIndex: number, prng: Prng): I
   }
 
   if (snapshot.voterToken !== null && checkVotePermission({ role, phase, action: "unvote" }).ok) {
-    const owned = merge(snapshot.confirmed, pendingState(snapshot.pending));
+    const owned = snapshot.full;
     const myVotes = activeVotes(owned).filter((v) => v.user === snapshot.voterToken);
     if (myVotes.length > 0) {
       candidates.push([

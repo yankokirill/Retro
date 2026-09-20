@@ -217,8 +217,20 @@ export function createSyncClient(config: SyncClientConfig, ports: ClientCorePort
   let voterToken: string | null = null;
   let rejections: Rejection[] = [];
 
+  // X_c ⊔ ⨆P, мемо по идентичности confirmed/pending (оба только заменяются).
+  // Одно и то же состояние нужно экрану (view), очередному `act` и проверкам
+  // симулятора — копировать большое состояние три раза на действие незачем.
+  let fullCache: { confirmed: State; pending: readonly PendingEntry[]; state: State } | null = null;
+
+  function fullOf(c: State, p: readonly PendingEntry[]): State {
+    if (fullCache === null || fullCache.confirmed !== c || fullCache.pending !== p) {
+      fullCache = { confirmed: c, pending: p, state: withPending(c, p) };
+    }
+    return fullCache.state;
+  }
+
   function viewState(): State {
-    return withPending(confirmed, pending);
+    return fullOf(confirmed, pending);
   }
 
   function saveOutbox(): void {
@@ -389,18 +401,19 @@ export function createSyncClient(config: SyncClientConfig, ports: ClientCorePort
       actorId,
       confirmed: snapshotConfirmed,
       pending: snapshotPending,
+      get full(): State {
+        return fullOf(snapshotConfirmed, snapshotPending);
+      },
       get view(): View {
         if (
           viewCache === null ||
           viewCache.confirmed !== snapshotConfirmed ||
           viewCache.pending !== snapshotPending
         ) {
-          let acc = snapshotConfirmed;
-          for (const entry of snapshotPending) acc = merge(acc, fromWire(entry.delta));
           viewCache = {
             confirmed: snapshotConfirmed,
             pending: snapshotPending,
-            view: materialize(acc),
+            view: materialize(fullOf(snapshotConfirmed, snapshotPending)),
           };
         }
         return viewCache.view;
