@@ -9,7 +9,7 @@ import type { Intent } from "@retro/client-core";
 import type { Command } from "@retro/protocol";
 import { generateCommand, generateIntent } from "./intents.js";
 import type { Connection } from "./network.js";
-import type { Prng } from "./prng.js";
+import type { Streams } from "./prng.js";
 import type { World } from "./world.js";
 
 export type Direction = "toServer" | "toClient";
@@ -20,8 +20,13 @@ export type Event =
   | { readonly kind: "cut"; readonly connection: number }
   | { readonly kind: "serverNotice"; readonly connection: number }
   | { readonly kind: "connect"; readonly client: number }
-  | { readonly kind: "reload"; readonly client: number }
-  | { readonly kind: "command"; readonly client: number; readonly command: Command }
+  | { readonly kind: "reload"; readonly client: number; readonly actorId: string }
+  | {
+      readonly kind: "command";
+      readonly client: number;
+      readonly command: Command;
+      readonly commandId: string;
+    }
   | { readonly kind: "snapshot" }
   | { readonly kind: "storeFault"; readonly afterWrites: number };
 
@@ -39,7 +44,8 @@ export type EventMode = "run" | "drain";
 export type Candidate =
   | { readonly kind: "act"; readonly client: number }
   | { readonly kind: "command"; readonly client: number }
-  | Exclude<Event, { readonly kind: "act" | "command" }>;
+  | { readonly kind: "reload"; readonly client: number }
+  | Exclude<Event, { readonly kind: "act" | "command" | "reload" }>;
 
 /**
  * Все события, разрешённые сейчас, в фиксированном порядке (§ 6 проекта: по
@@ -154,17 +160,29 @@ export function enabledEvents(world: World, mode: EventMode): readonly Candidate
  * `generateIntent`, а не только структурной проверки роли) — вызывающий
  * (run.ts) должен выбрать другого кандидата.
  */
-export function resolveCandidate(world: World, candidate: Candidate, prng: Prng): Event | null {
+export function resolveCandidate(
+  world: World,
+  candidate: Candidate,
+  streams: Streams,
+): Event | null {
+  const { selection, ids } = streams;
   if (candidate.kind === "act") {
-    const intent = generateIntent(world, candidate.client, prng);
+    const intent = generateIntent(world, candidate.client, selection);
     return intent ? { kind: "act", client: candidate.client, intent } : null;
   }
   if (candidate.kind === "command") {
-    const command = generateCommand(world, candidate.client, prng);
-    return command ? { kind: "command", client: candidate.client, command } : null;
+    const command = generateCommand(world, candidate.client, selection);
+    return command
+      ? { kind: "command", client: candidate.client, command, commandId: ids.uuid() }
+      : null;
+  }
+  if (candidate.kind === "reload") {
+    // Идентификатор нового экземпляра клиента — в решении: иначе replay выдал бы другой
+    // `actorId`, а конфликты решаются по его строке (compareStamps).
+    return { kind: "reload", client: candidate.client, actorId: ids.uuid() };
   }
   if (candidate.kind === "storeFault") {
-    return { kind: "storeFault", afterWrites: prng.int(0, 1) };
+    return { kind: "storeFault", afterWrites: selection.int(0, 1) };
   }
   return candidate;
 }

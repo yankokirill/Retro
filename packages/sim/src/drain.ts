@@ -11,7 +11,7 @@
 // цикл (run.ts вызывает drain() на каждой контрольной точке).
 
 import { type Event, enabledEvents, resolveCandidate } from "./events.js";
-import type { Prng } from "./prng.js";
+import type { Streams } from "./prng.js";
 import { type Violation, violation } from "./violation.js";
 import type { World } from "./world.js";
 
@@ -27,7 +27,7 @@ function drainBudget(world: World): number {
 
 export async function drain(
   world: World,
-  prng: Prng,
+  streams: Streams,
   decisions: Event[],
   step: (event: Event) => Promise<Violation | null>,
 ): Promise<Violation | null> {
@@ -67,9 +67,9 @@ export async function drain(
     while (deliveries < budget) {
       const candidates = enabledEvents(world, "drain");
       if (candidates.length === 0) break;
-      const chosenCandidate = candidates[prng.int(0, candidates.length - 1)];
+      const chosenCandidate = candidates[streams.selection.int(0, candidates.length - 1)];
       if (!chosenCandidate) break;
-      const event = resolveCandidate(world, chosenCandidate, prng);
+      const event = resolveCandidate(world, chosenCandidate, streams);
       if (!event) break; // deliver-кандидаты всегда резолвятся — защитный выход
       decisions.push(event);
       const result = await step(event);

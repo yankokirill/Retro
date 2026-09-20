@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { main, parseCliArgs } from "../src/cli.js";
-import { TRACE_VERSION } from "../src/config.js";
+import { SCHEDULER_VERSION, TRACE_VERSION } from "../src/config.js";
 
 let logs: string[];
 let errors: string[];

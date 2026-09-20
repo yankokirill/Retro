@@ -29,7 +29,7 @@ import { recordConflictAtCheckpoint } from "./coverage.js";
 import { drain } from "./drain.js";
 import { type Candidate, type Event, enabledEvents, resolveCandidate } from "./events.js";
 import { foldNewRows } from "./oracle.js";
-import { createPrng, type Prng } from "./prng.js";
+import { createStreams, type Prng, type Streams } from "./prng.js";
 import type { Stats } from "./stats.js";
 import type { Violation } from "./violation.js";
 import { createWellFormedState, type WellFormedState } from "./well-formed.js";
@@ -90,7 +90,12 @@ function eventWeight(world: World, kind: Candidate["kind"]): number {
  * (`generateIntent`/`generateCommand` не нашли, что предложить) — вид
  * исключается из рассмотрения на этом шаге, пробуем следующий по весу.
  */
-function chooseEvent(world: World, candidates: readonly Candidate[], prng: Prng): Event | null {
+function chooseEvent(
+  world: World,
+  candidates: readonly Candidate[],
+  streams: Streams,
+): Event | null {
+  const prng: Prng = streams.selection;
   const remainingKinds = new Set(candidates.map((c) => c.kind));
 
   while (remainingKinds.size > 0) {
@@ -113,7 +118,7 @@ function chooseEvent(world: World, candidates: readonly Candidate[], prng: Prng)
     for (let i = 0; i < pool.length; i++) {
       const candidate = pool[(offset + i) % pool.length];
       if (!candidate) continue;
-      const event = resolveCandidate(world, candidate, prng);
+      const event = resolveCandidate(world, candidate, streams);
       if (event) return event;
     }
     remainingKinds.delete(kind);
@@ -126,9 +131,8 @@ async function step(
   world: World,
   event: Event,
   wellFormedState: WellFormedState,
-  prng: Prng,
 ): Promise<Violation | null> {
-  const observation = await applyEvent(world, event, prng);
+  const observation = await applyEvent(world, event);
 
   if (observation.newLogRows.length > 0) {
     foldNewRows(world.oracle, observation.newLogRows);
@@ -163,12 +167,12 @@ async function step(
 /** Досылка (SIM-07) + проверки, верные только «в покое»: S4, S5, S6, S7 (резидуа), S8, полный S1. */
 async function checkpoint(
   world: World,
-  prng: Prng,
+  streams: Streams,
   decisions: Event[],
   wellFormedState: WellFormedState,
 ): Promise<Violation | null> {
-  const drainViolation = await drain(world, prng, decisions, (event) =>
-    step(world, event, wellFormedState, prng),
+  const drainViolation = await drain(world, streams, decisions, (event) =>
+    step(world, event, wellFormedState),
   );
   if (drainViolation) return drainViolation;
 
@@ -202,24 +206,25 @@ function fail(violation: Violation, decisions: readonly Event[], stats: Stats): 
 }
 
 export async function runSimulation(config: SimConfig): Promise<RunResult> {
-  const prng = createPrng(config.seed);
-  const world = createWorld(config, prng);
+  const streams = createStreams(config.seed);
+  const prng = streams.selection;
+  const world = createWorld(config, streams.world);
   const wellFormedState = createWellFormedState();
   const decisions: Event[] = [];
   let nextCheckpoint = prng.int(config.checkpointMin, config.checkpointMax);
 
   while (world.acts < config.ops) {
     const candidates = enabledEvents(world, "run");
-    const event = chooseEvent(world, candidates, prng);
+    const event = chooseEvent(world, candidates, streams);
     if (!event) break; // мир не может сделать ни шага — завершаем прогон как есть
 
     decisions.push(event);
     world.stats.steps += 1;
-    const violation = await step(world, event, wellFormedState, prng);
+    const violation = await step(world, event, wellFormedState);
     if (violation) return fail(violation, decisions, world.stats);
 
     if (world.acts >= nextCheckpoint) {
-      const violation2 = await checkpoint(world, prng, decisions, wellFormedState);
+      const violation2 = await checkpoint(world, streams, decisions, wellFormedState);
       if (violation2) return fail(violation2, decisions, world.stats);
       // не чаще, чем раз в 1/8 уже выполненных действий: сравнение состояний целиком (S4/S5)
       // стоит O(состояния), суммарная стоимость проверок должна расти линейно
@@ -232,6 +237,6 @@ export async function runSimulation(config: SimConfig): Promise<RunResult> {
     }
   }
 
-  const violation = await checkpoint(world, prng, decisions, wellFormedState);
+  const violation = await checkpoint(world, streams, decisions, wellFormedState);
   return violation ? fail(violation, decisions, world.stats) : ok(decisions, world.stats);
 }

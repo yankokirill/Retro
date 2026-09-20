@@ -5,7 +5,7 @@
 // ни `replayTrace`, ни минимизации.
 
 import type { Profile } from "./config.js";
-import { TRACE_VERSION } from "./config.js";
+import { SCHEDULER_VERSION, TRACE_VERSION } from "./config.js";
 import type { Event } from "./events.js";
 
 export interface TraceConfig {
@@ -17,14 +17,17 @@ export interface TraceConfig {
 }
 
 export interface Trace {
+  /** Формат решений (`TRACE_VERSION`). */
   readonly version: number;
+  /** Алгоритм чисел и порядок событий (`SCHEDULER_VERSION`) — для `--replay` не важен. */
+  readonly schedulerVersion: number;
   readonly seed: number;
   readonly config: TraceConfig;
   readonly decisions: readonly Event[];
 }
 
 export function createTrace(seed: number, config: TraceConfig, decisions: readonly Event[]): Trace {
-  return { version: TRACE_VERSION, seed, config, decisions };
+  return { version: TRACE_VERSION, schedulerVersion: SCHEDULER_VERSION, seed, config, decisions };
 }
 
 /**
