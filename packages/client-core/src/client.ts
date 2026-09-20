@@ -349,14 +349,18 @@ export function createSyncClient(config: SyncClientConfig, ports: ClientCorePort
     role = msg.role;
     voterToken = msg.voterToken;
     meta = msg.meta;
+    // Всё содержимое welcome — одним слиянием: по одной дельте это копия
+    // растущего состояния на каждую строку журнала (O(k²) на длинной досылке).
+    const incoming: State[] = [];
     if (msg.snapshot) {
-      confirmed = merge(confirmed, fromWire(msg.snapshot.state));
+      incoming.push(fromWire(msg.snapshot.state));
       lastSeq = lastSeq === null ? msg.snapshot.upToSeq : Math.max(lastSeq, msg.snapshot.upToSeq);
     }
     for (const row of msg.ops) {
-      confirmed = merge(confirmed, fromWire(row.delta));
+      incoming.push(fromWire(row.delta));
       lastSeq = lastSeq === null ? row.seq : Math.max(lastSeq, row.seq);
     }
+    if (incoming.length > 0) confirmed = mergeAll([confirmed, ...incoming]);
     status = "welcomed";
     return pending.map((entry) => JSON.stringify({ type: "op", delta: entry.delta }));
   }
