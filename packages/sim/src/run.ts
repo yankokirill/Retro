@@ -25,6 +25,7 @@ import {
   checkWellFormedIncremental,
 } from "./checks.js";
 import type { SimConfig } from "./config.js";
+import { recordConflictAtCheckpoint } from "./coverage.js";
 import { drain } from "./drain.js";
 import { type Candidate, type Event, enabledEvents, resolveCandidate } from "./events.js";
 import { foldNewRows } from "./oracle.js";
@@ -163,6 +164,7 @@ async function checkpoint(
   if (drainViolation) return drainViolation;
 
   world.stats.checkpoints += 1;
+  recordConflictAtCheckpoint(world);
 
   const fullViolation = checkWellFormedFull(world.store.log(world.boardId), world.acts);
   if (fullViolation) return fullViolation;

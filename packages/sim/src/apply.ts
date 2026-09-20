@@ -14,6 +14,7 @@ import type {
   OutgoingObservation,
   RejectObservation,
 } from "./checks.js";
+import { noteMessageBytes, recordServerStep, type SentFacts } from "./coverage.js";
 import type { Event } from "./events.js";
 import { createConnection, type Direction } from "./network.js";
 import type { Prng } from "./prng.js";
@@ -102,22 +103,23 @@ function applyAct(
   world.acts += 1;
 
   const result = client.core.act(intent);
-  if (!result.ok) {
-    world.stats.rejectedByReason[result.reason] =
-      (world.stats.rejectedByReason[result.reason] ?? 0) + 1;
-    return EMPTY;
-  }
+  if (!result.ok) return EMPTY;
 
   world.stats.actsByIntent[intent.type] = (world.stats.actsByIntent[intent.type] ?? 0) + 1;
 
   if (client.connection !== null) {
     const connection = world.connections[client.connection];
     if (connection?.alive) {
-      for (const raw of result.send) connection.toServer.push(raw);
+      for (const raw of result.send) {
+        connection.toServer.push(raw);
+        noteMessageBytes(world, "toServer", raw);
+      }
     }
   }
 
-  const lastPending = client.core.inspect().pending.at(-1);
+  const pendingNow = client.core.inspect().pending;
+  if (pendingNow.length > world.stats.maxPending) world.stats.maxPending = pendingNow.length;
+  const lastPending = pendingNow.at(-1);
   const createdId = lastPending?.delta.created[0]?.id;
   const touched = intentTarget(intent) ?? createdId;
   if (touched) touchRecent(world, touched);
@@ -140,6 +142,7 @@ async function applyDeliverToServer(
   if (raw === undefined) return EMPTY;
 
   const beforeSeq = lastSeqOf(world.store.log(world.boardId));
+  const phaseBefore = world.store.boardSync(world.boardId)?.phase ?? "collect";
   const result = await world.server.receive(connection.id, raw);
   const afterRows = world.store.log(world.boardId);
   const newLogRows = afterRows.filter((r) => r.seq > beforeSeq);
@@ -153,16 +156,21 @@ async function applyDeliverToServer(
 
   const outgoing: OutgoingObservation[] = [];
   const rejects: (RejectObservation | ErrorObservation)[] = [];
+  const sentFacts: SentFacts[] = [];
 
   for (const out of result.outgoing) {
+    const sent = JSON.parse(out.raw) as SentFacts;
+    sentFacts.push(sent);
     const targetIndex = world.connections.findIndex((c) => c.id === out.to);
     if (targetIndex === -1) continue;
     const target = world.connections[targetIndex];
     if (!target || !target.alive) {
+      if (target && !target.serverClosed) target.addressedAfterCut += 1;
       world.stats.lostAfterCut += 1;
       continue;
     }
     target.toClient.push(out.raw);
+    noteMessageBytes(world, "toClient", out.raw);
 
     const recipientClient = findClientByConnection(world, targetIndex);
     const recipientGuestId = recipientClient
@@ -171,12 +179,20 @@ async function applyDeliverToServer(
     if (recipientGuestId) outgoing.push({ raw: out.raw, recipientGuestId, phaseAtSend });
 
     // Только «error forbidden» после E9: схему проверяет S11, здесь достаточно полей.
-    const sent = JSON.parse(out.raw) as { type?: string; reason?: string };
     if (sent.type === "error" && sent.reason === "forbidden") {
       rejects.push({ kind: "error", afterStoreFault: world.pendingStoreFault });
       world.pendingStoreFault = false;
     }
   }
+
+  recordServerStep(world, {
+    connectionIndex,
+    incoming: JSON.parse(raw),
+    sent: sentFacts,
+    newLogRows: newLogRows.length,
+    phaseBefore,
+    phaseAfter: phaseAtSend,
+  });
 
   for (const closeId of result.close) {
     const idx = world.connections.findIndex((c) => c.id === closeId);
@@ -245,6 +261,18 @@ function applyDeliverToClient(world: World, connectionIndex: number): StepObserv
   }
 
   const replies = client.core.receive(raw);
+  if (message.type === "reject") {
+    // Отказ убрал из очереди не только отклонённую дельту: зависимые удалены каскадом
+    // (ADR-0010 а/б, у записи rejections есть `cause`) или пересобраны заново (в, новые dot).
+    const after = client.core.inspect();
+    const known = new Set(pendingBefore.map((entry) => `${entry.dot.actor}:${entry.dot.counter}`));
+    const cascaded =
+      after.rejections.some((rejection) => rejection.cause !== undefined) ||
+      after.pending.some((entry) => !known.has(`${entry.dot.actor}:${entry.dot.counter}`));
+    if (cascaded && pendingBefore.length > 1) {
+      world.stats.coverage.opBuiltOnRejectedUnconfirmed = true;
+    }
+  }
   if (message.type === "error") {
     // error приходит перед закрытием соединения сервером: клиент уходит в офлайн
     client.core.disconnected();
@@ -253,7 +281,10 @@ function applyDeliverToClient(world: World, connectionIndex: number): StepObserv
     clientLearnsClose(world, connectionIndex);
   }
   if (connection.alive) {
-    for (const replyRaw of replies) connection.toServer.push(replyRaw);
+    for (const replyRaw of replies) {
+      connection.toServer.push(replyRaw);
+      noteMessageBytes(world, "toServer", replyRaw);
+    }
   }
 
   return { newLogRows: [], acks, rejects, outgoing: [], sentRaw: [{ direction: "toClient", raw }] };
@@ -270,13 +301,17 @@ function clientLearnsClose(world: World, connectionIndex: number): void {
 function applyCut(world: World, connectionIndex: number): StepObservation {
   const connection = world.connections[connectionIndex];
   if (!connection || !connection.alive) return EMPTY;
+  const client = findClientByConnection(world, connectionIndex);
+  if (client && client.core.inspect().pending.length > 0) {
+    world.stats.faultCoverage.cutWithNonEmptyPending = true;
+  }
+  if (connection.toClient.length > 0) world.stats.faultCoverage.cutWithNonEmptyToClient = true;
   connection.alive = false;
   connection.toServer.length = 0;
   connection.toClient.length = 0;
   connection.noticePending = true;
   world.stats.cuts += 1;
 
-  const client = findClientByConnection(world, connectionIndex);
   if (client) {
     client.core.disconnected();
     client.connection = null;
@@ -287,6 +322,8 @@ function applyCut(world: World, connectionIndex: number): StepObservation {
 async function applyServerNotice(world: World, connectionIndex: number): Promise<StepObservation> {
   const connection = world.connections[connectionIndex];
   if (!connection) return EMPTY;
+  if (connection.addressedAfterCut > 0)
+    world.stats.faultCoverage.noticeAfterAddressedMessage = true;
   await world.server.close(connection.id);
   connection.noticePending = false;
   return EMPTY;
@@ -302,8 +339,14 @@ function applyConnect(world: World, clientIndex: number): StepObservation {
   world.server.open(connection.id, world.boardId);
   client.connection = connectionIndex;
 
+  if (client.core.inspect().lastSeq === null)
+    world.stats.faultCoverage.connectWithNullLastSeq = true;
+  else world.stats.faultCoverage.connectWithKnownLastSeq = true;
   const [hello] = client.core.connected();
-  if (hello) connection.toServer.push(hello);
+  if (hello) {
+    connection.toServer.push(hello);
+    noteMessageBytes(world, "toServer", hello);
+  }
   return EMPTY;
 }
 
@@ -324,7 +367,10 @@ function applyReload(world: World, clientIndex: number, prng: Prng): StepObserva
   }
 
   const pendingLost = client.core.inspect().pending.length;
-  if (pendingLost > 0) world.stats.coverage.reloadWithNonEmptyPending = true;
+  if (pendingLost > 0) {
+    world.stats.coverage.reloadWithNonEmptyPending = true;
+    world.stats.faultCoverage.reloadWithNonEmptyPending = true;
+  }
 
   const outbox = createMemoryOutboxStore();
   client.core = createSyncClient(

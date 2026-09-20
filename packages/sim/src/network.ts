@@ -21,6 +21,8 @@ export interface Connection {
   serverClosed: boolean;
   /** E3 произошёл, E4 (`serverNotice`) ещё не доставлен — сервер может адресовать соединению сообщения, они теряются (§ 4.2). */
   noticePending: boolean;
+  /** Сколько сообщений сервер адресовал этому соединению уже после разрыва (§ 4.3, SIM-04: E4 «позже» такого сообщения). */
+  addressedAfterCut: number;
 }
 
 export function createConnection(id: string, clientIndex: number): Connection {
@@ -32,6 +34,7 @@ export function createConnection(id: string, clientIndex: number): Connection {
     alive: true,
     serverClosed: false,
     noticePending: false,
+    addressedAfterCut: 0,
   };
 }
 
