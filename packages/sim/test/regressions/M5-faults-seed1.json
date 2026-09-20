@@ -1,0 +1,49 @@
+{
+  "version": 3,
+  "schedulerVersion": 3,
+  "seed": 1,
+  "config": {
+    "clients": 5,
+    "ops": 500,
+    "profile": "faults",
+    "checkpointMin": 200,
+    "checkpointMax": 800
+  },
+  "decisions": [
+    { "kind": "connect", "client": 2 },
+    { "kind": "cut", "connection": 0 },
+    { "kind": "storeFault", "afterWrites": 0 },
+    {
+      "kind": "act",
+      "client": 2,
+      "intent": {
+        "type": "createSticker",
+        "column": "continue",
+        "frac": "ab",
+        "text": "alpha",
+        "color": "purple"
+      }
+    },
+    {
+      "kind": "act",
+      "client": 2,
+      "intent": {
+        "type": "setColor",
+        "id": "0a53864b-ead5-4c37-80c8-4707ade8fba9:1",
+        "color": "blue"
+      }
+    },
+    { "kind": "connect", "client": 2 },
+    { "kind": "deliver", "connection": 1, "direction": "toServer" },
+    { "kind": "deliver", "connection": 1, "direction": "toClient" },
+    { "kind": "deliver", "connection": 1, "direction": "toServer" },
+    { "kind": "deliver", "connection": 1, "direction": "toClient" },
+    { "kind": "connect", "client": 2 },
+    { "kind": "deliver", "connection": 2, "direction": "toServer" },
+    { "kind": "deliver", "connection": 2, "direction": "toClient" },
+    { "kind": "deliver", "connection": 2, "direction": "toServer" },
+    { "kind": "deliver", "connection": 2, "direction": "toServer" },
+    { "kind": "deliver", "connection": 2, "direction": "toClient" },
+    { "kind": "deliver", "connection": 2, "direction": "toClient" }
+  ]
+}

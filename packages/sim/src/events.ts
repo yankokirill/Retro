@@ -6,6 +6,8 @@
 // `World.connections`, стабильные в пределах одного прогона (§ 6 проекта).
 
 import type { Intent } from "@retro/client-core";
+import type { State } from "@retro/crdt";
+import { entityKind } from "@retro/crdt";
 import type { Command } from "@retro/protocol";
 import { generateCommand, generateIntent } from "./intents.js";
 import type { Connection } from "./network.js";
@@ -228,7 +230,11 @@ export function isApplicable(world: World, event: Event): boolean {
     case "act": {
       const client = world.clients[event.client];
       const guest = client ? world.guests[client.guestIndex] : undefined;
-      return guest !== undefined && guest.role !== "viewer";
+      if (client === undefined || guest === undefined || guest.role === "viewer") return false;
+      // Интерфейс действует только над тем, что клиент знает (§ 5.2): минимизация, удалившая
+      // создание сущности, не должна получать «действие над невидимым» — оно не воспроизводит
+      // исходное нарушение, а выдумывает другое (его ядро сервера законно отклоняет).
+      return intentTargetsKnown(client.core.inspect().full, event.intent);
     }
     case "command": {
       const client = world.clients[event.client];
@@ -246,5 +252,36 @@ export function isApplicable(world: World, event: Event): boolean {
       return true;
     case "checkpoint":
       return true;
+  }
+}
+
+/** Все сущности и голос, на которые ссылается намерение, известны клиенту в `X_c ⊔ ⨆P`. */
+function intentTargetsKnown(state: State, intent: Intent): boolean {
+  const known = (id: string): boolean => entityKind(state, id) !== undefined;
+  switch (intent.type) {
+    case "editText":
+    case "setColor":
+    case "move":
+    case "delete":
+    case "restore":
+    case "renameGroup":
+    case "editAction":
+    case "assign":
+    case "setDone":
+      return known(intent.id);
+    case "setGroup":
+      return known(intent.id) && (intent.group === null || known(intent.group));
+    case "vote":
+      return known(intent.target);
+    case "unvote": {
+      if (!known(intent.target)) return false;
+      const dot = intent.voteDot;
+      for (const vote of state.votes.values()) {
+        if (vote.dot.actor === dot.actor && vote.dot.counter === dot.counter) return true;
+      }
+      return false;
+    }
+    default:
+      return true; // создание сущностей ни от чего не зависит
   }
 }

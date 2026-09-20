@@ -12,6 +12,7 @@
     "build": "tsc -b",
     "sim": "tsx src/cli.ts",
     "sim:long": "node scripts/sim-long.mjs",
+    "sim:regressions": "tsx scripts/generate-regressions.mts",
     "test:sim": "node -e \"require('node:fs').rmSync('.coverage',{recursive:true,force:true})\" && vitest run --exclude test/coverage.test.ts && vitest run test/coverage.test.ts"
   },
   "dependencies": {
