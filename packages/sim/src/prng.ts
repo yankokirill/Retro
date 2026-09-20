@@ -63,6 +63,55 @@ function sfc32(a: number, b: number, c: number, d: number): () => number {
   };
 }
 
+/** Подпотоки одного `seed` (docs/spec/simulator.md § 6 п. 4). */
+export type StreamName = "selection" | "world" | "ids";
+
+/** Три независимых потока: расход одного не сдвигает числа другого. */
+export interface Streams {
+  /** Выбор события и намерения — при `--replay` не расходуется вовсе. */
+  readonly selection: Prng;
+  /** Среда мира: гости/роли/`voteLimit`, пропуски `seq` хранилища. */
+  readonly world: Prng;
+  /** Идентификаторы `reload`/`command`, попадающие в решения трассы. */
+  readonly ids: Prng;
+}
+
+const STREAM_SALT: Readonly<Record<StreamName, number>> = {
+  selection: 0x51e1_ec71,
+  world: 0x3021_d000,
+  ids: 0x1d5c_0de1,
+};
+
+function subSeed(seed: number, salt: number): number {
+  return splitmix32((seed ^ salt) >>> 0)();
+}
+
+export function createStream(seed: number, name: StreamName): Prng {
+  return createPrng(subSeed(seed, STREAM_SALT[name]));
+}
+
+export function createStreams(seed: number): Streams {
+  return {
+    selection: createStream(seed, "selection"),
+    world: createStream(seed, "world"),
+    ids: createStream(seed, "ids"),
+  };
+}
+
+/**
+ * UUID, зависящий только от `(seed, label)`: не от порядка и состава событий прогона.
+ * Так начальные клиенты получают одни и те же `actorId` и в исходном прогоне, и в
+ * `--replay`/минимизации, где часть решений удалена.
+ */
+export function deriveUuid(seed: number, label: string): string {
+  let hash = 0x811c_9dc5;
+  for (let i = 0; i < label.length; i++) {
+    hash ^= label.charCodeAt(i);
+    hash = Math.imul(hash, 0x0100_0193);
+  }
+  return createPrng(subSeed(seed, hash >>> 0)).uuid();
+}
+
 export function createPrng(seed: number): Prng {
   if (!Number.isInteger(seed) || seed < 0 || seed > 0xff_ff_ff_ff) {
     throw new Error(`createPrng: seed must be an integer in [0, 2^32-1], got ${seed}`);

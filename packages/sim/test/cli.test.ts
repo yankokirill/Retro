@@ -2,12 +2,12 @@
 // принудительная запись трассы. Путь нарушения (код 1) — в cli-failure.test.ts
 // (подмена runSimulation: на живой системе нарушения нет).
 
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { main, parseCliArgs } from "../src/cli.js";
-import { TRACE_VERSION } from "../src/config.js";
+import { SCHEDULER_VERSION, TRACE_VERSION } from "../src/config.js";
 
 let logs: string[];
 let errors: string[];
@@ -54,6 +54,48 @@ describe("CLI § 11.1: разбор флагов", () => {
     }
     const good = parseCliArgs(["--seed=0", "--ops=10000", "--clients=20"]);
     expect(good.ok).toBe(true);
+  });
+});
+
+describe("CLI § 11.1: --replay", () => {
+  it("CLI § 9.2: --replay несовместим с флагами прогона — конфигурация берётся из трассы", () => {
+    const parsed = parseCliArgs(["--replay=t.json", "--seed=1"]);
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.error).toContain("--seed");
+    expect(parseCliArgs(["--replay=t.json"]).ok).toBe(true);
+  });
+
+  it("SIM-10 кр. 1: трасса, записанная --trace, воспроизводится --replay — код 0, ничего не пропущено", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sim-cli-replay-"));
+    try {
+      const path = join(dir, "trace.json");
+      expect(
+        await main(["--clients=3", "--ops=60", "--seed=9", "--quiet", `--trace=${path}`]),
+      ).toBe(0);
+      logs.length = 0;
+      expect(await main([`--replay=${path}`])).toBe(0);
+      expect(logs.join("\n")).toMatch(
+        /^REPLAY OK seed=9 profile=default clients=3 ops=60 решений=\d+ выполнено=\d+ пропущено=0 /,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("CLI § 11.1: нет файла, не JSON и чужая версия формата — код 2", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sim-cli-replay-"));
+    try {
+      expect(await main([`--replay=${join(dir, "нет.json")}`])).toBe(2);
+      const broken = join(dir, "broken.json");
+      writeFileSync(broken, "{");
+      expect(await main([`--replay=${broken}`])).toBe(2);
+      const foreign = join(dir, "foreign.json");
+      writeFileSync(foreign, JSON.stringify({ version: 999 }));
+      expect(await main([`--replay=${foreign}`])).toBe(2);
+      expect(errors.join("\n")).toContain("несовместимая версия формата трассы");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

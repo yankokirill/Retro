@@ -4,7 +4,7 @@
 // (checks.ts) вызывает run.ts/drain.ts на основе этого наблюдения (см.
 // комментарий в run.ts к `step`).
 
-import { createMemoryOutboxStore, createSyncClient, type Intent } from "@retro/client-core";
+import type { Intent } from "@retro/client-core";
 import type { Dot, EntityId } from "@retro/crdt";
 import type { RejectReason } from "@retro/protocol";
 import type { OpRow } from "@retro/server-core";
@@ -17,9 +17,8 @@ import type {
 import { noteMessageBytes, recordServerStep, type SentFacts } from "./coverage.js";
 import type { Event } from "./events.js";
 import { createConnection, type Direction } from "./network.js";
-import type { Prng } from "./prng.js";
 import type { ClientState, World } from "./world.js";
-import { touchRecent } from "./world.js";
+import { createClientCore, touchRecent } from "./world.js";
 
 export interface StepObservation {
   /** Новые строки журнала, появившиеся за это событие (обычно 0 или 1 — только `deliver toServer`, принявший операцию). */
@@ -78,7 +77,7 @@ function connectionIndexOf(world: World, id: string): number {
   return world.connections[index]?.id === id ? index : -1;
 }
 
-export async function applyEvent(world: World, event: Event, prng: Prng): Promise<StepObservation> {
+export async function applyEvent(world: World, event: Event): Promise<StepObservation> {
   switch (event.kind) {
     case "act":
       return applyAct(world, event.client, event.intent);
@@ -93,9 +92,9 @@ export async function applyEvent(world: World, event: Event, prng: Prng): Promis
     case "connect":
       return applyConnect(world, event.client);
     case "reload":
-      return applyReload(world, event.client, prng);
+      return applyReload(world, event.client, event.actorId);
     case "command":
-      return applyCommand(world, event.client, event.command);
+      return applyCommand(world, event.client, event.command, event.commandId);
     case "snapshot":
       return applySnapshot(world);
     case "storeFault":
@@ -225,8 +224,10 @@ async function applyDeliverToServer(
 function applyDeliverToClient(world: World, connectionIndex: number): StepObservation {
   const connection = world.connections[connectionIndex];
   if (!connection) return EMPTY;
-  const raw = connection.toClient.shift();
-  if (raw === undefined) return EMPTY;
+  const queued = connection.toClient.shift();
+  if (queued === undefined) return EMPTY;
+  // Сеть «сервер → клиент» (единственное место подмены, § 10.2 M2): дальше мир и клиент видят то, что дошло.
+  const raw = world.hooks?.toClient?.(queued) ?? queued;
 
   const client = findClientByConnection(world, connectionIndex);
   if (!client)
@@ -295,7 +296,8 @@ function applyDeliverToClient(world: World, connectionIndex: number): StepObserv
     clientLearnsClose(world, connectionIndex);
   }
   if (connection.alive) {
-    for (const replyRaw of replies) {
+    const sent = world.hooks?.clientReplies?.(raw, replies) ?? replies;
+    for (const replyRaw of sent) {
       connection.toServer.push(replyRaw);
       noteMessageBytes(world, "toServer", replyRaw);
     }
@@ -364,7 +366,7 @@ function applyConnect(world: World, clientIndex: number): StepObservation {
   return EMPTY;
 }
 
-function applyReload(world: World, clientIndex: number, prng: Prng): StepObservation {
+function applyReload(world: World, clientIndex: number, actorId: string): StepObservation {
   const client = world.clients[clientIndex];
   if (!client) return EMPTY;
   const guest = world.guests[client.guestIndex];
@@ -386,12 +388,10 @@ function applyReload(world: World, clientIndex: number, prng: Prng): StepObserva
     world.stats.faultCoverage.reloadWithNonEmptyPending = true;
   }
 
-  const outbox = createMemoryOutboxStore();
-  client.core = createSyncClient(
-    { boardId: world.boardId, guestId: guest.id, displayName: guest.displayName },
-    { newActorId: () => prng.uuid(), newCommandId: () => prng.uuid(), outbox },
-  );
-  client.outbox = outbox;
+  const fresh = createClientCore(world.boardId, guest, actorId);
+  client.core = fresh.core;
+  client.outbox = fresh.outbox;
+  client.commandIds = fresh.commandIds;
   client.connection = null;
   world.stats.reloads += 1;
   return EMPTY;
@@ -401,12 +401,14 @@ function applyCommand(
   world: World,
   clientIndex: number,
   command: Extract<Event, { kind: "command" }>["command"],
+  commandId: string,
 ): StepObservation {
   const client = world.clients[clientIndex];
   if (!client || client.connection === null) return EMPTY;
   const connection = world.connections[client.connection];
   if (!connection?.alive) return EMPTY;
 
+  if (client.commandIds) client.commandIds.next = commandId;
   const [raw] = client.core.command(command);
   if (raw) connection.toServer.push(raw);
   return EMPTY;

@@ -9,7 +9,7 @@ import type { Intent } from "@retro/client-core";
 import type { Command } from "@retro/protocol";
 import { generateCommand, generateIntent } from "./intents.js";
 import type { Connection } from "./network.js";
-import type { Prng } from "./prng.js";
+import type { Streams } from "./prng.js";
 import type { World } from "./world.js";
 
 export type Direction = "toServer" | "toClient";
@@ -20,10 +20,20 @@ export type Event =
   | { readonly kind: "cut"; readonly connection: number }
   | { readonly kind: "serverNotice"; readonly connection: number }
   | { readonly kind: "connect"; readonly client: number }
-  | { readonly kind: "reload"; readonly client: number }
-  | { readonly kind: "command"; readonly client: number; readonly command: Command }
+  | { readonly kind: "reload"; readonly client: number; readonly actorId: string }
+  | {
+      readonly kind: "command";
+      readonly client: number;
+      readonly command: Command;
+      readonly commandId: string;
+    }
   | { readonly kind: "snapshot" }
-  | { readonly kind: "storeFault"; readonly afterWrites: number };
+  | { readonly kind: "storeFault"; readonly afterWrites: number }
+  /**
+   * Не событие мира, а отметка в трассе: здесь была контрольная точка (после досылки). Без неё
+   * `--replay` не знал бы, где выполнять проверки покоя (S4–S8) и оценивать исход досылки (S9).
+   */
+  | { readonly kind: "checkpoint" };
 
 export type EventMode = "run" | "drain";
 
@@ -39,7 +49,8 @@ export type EventMode = "run" | "drain";
 export type Candidate =
   | { readonly kind: "act"; readonly client: number }
   | { readonly kind: "command"; readonly client: number }
-  | Exclude<Event, { readonly kind: "act" | "command" }>;
+  | { readonly kind: "reload"; readonly client: number }
+  | Exclude<Event, { readonly kind: "act" | "command" | "reload" | "checkpoint" }>;
 
 /**
  * Все события, разрешённые сейчас, в фиксированном порядке (§ 6 проекта: по
@@ -135,7 +146,13 @@ export function enabledEvents(world: World, mode: EventMode): readonly Candidate
   world.clients.forEach((client, clientIndex) => {
     const guest = world.guests[client.guestIndex];
     if (!guest) return;
-    if ((guest.role === "owner" || guest.role === "facilitator") && client.connection !== null) {
+    // Ядро клиента отправляет команду только после welcome (`command()` до него возвращает []):
+    // предложенная раньше команда молча пропадала, и фаза почти не менялась.
+    if (
+      (guest.role === "owner" || guest.role === "facilitator") &&
+      client.connection !== null &&
+      client.core.inspect().status === "welcomed"
+    ) {
       events.push({ kind: "command", client: clientIndex });
     }
   });
@@ -154,17 +171,80 @@ export function enabledEvents(world: World, mode: EventMode): readonly Candidate
  * `generateIntent`, а не только структурной проверки роли) — вызывающий
  * (run.ts) должен выбрать другого кандидата.
  */
-export function resolveCandidate(world: World, candidate: Candidate, prng: Prng): Event | null {
+export function resolveCandidate(
+  world: World,
+  candidate: Candidate,
+  streams: Streams,
+): Event | null {
+  const { selection, ids } = streams;
   if (candidate.kind === "act") {
-    const intent = generateIntent(world, candidate.client, prng);
+    const intent = generateIntent(world, candidate.client, selection);
     return intent ? { kind: "act", client: candidate.client, intent } : null;
   }
   if (candidate.kind === "command") {
-    const command = generateCommand(world, candidate.client, prng);
-    return command ? { kind: "command", client: candidate.client, command } : null;
+    const command = generateCommand(world, candidate.client, selection);
+    return command
+      ? { kind: "command", client: candidate.client, command, commandId: ids.uuid() }
+      : null;
+  }
+  if (candidate.kind === "reload") {
+    // Идентификатор нового экземпляра клиента — в решении: иначе replay выдал бы другой
+    // `actorId`, а конфликты решаются по его строке (compareStamps).
+    return { kind: "reload", client: candidate.client, actorId: ids.uuid() };
   }
   if (candidate.kind === "storeFault") {
-    return { kind: "storeFault", afterWrites: prng.int(0, 1) };
+    return { kind: "storeFault", afterWrites: selection.int(0, 1) };
   }
   return candidate;
+}
+
+/**
+ * Можно ли выполнить записанное решение в текущем мире (docs/spec/simulator.md § 9.2:
+ * неприменимое пропускается и считается — так работает минимизация, удалившая часть
+ * предпосылок). Условия те же, что у `enabledEvents`, кроме бюджета `--ops`, который при
+ * воспроизведении не действует: трасса — то, что было выполнено.
+ */
+export function isApplicable(world: World, event: Event): boolean {
+  switch (event.kind) {
+    case "deliver": {
+      const connection = world.connections[event.connection];
+      if (!connection) return false;
+      if (event.direction === "toClient") {
+        if (connection.toClient.length === 0) return false;
+        return connection.alive || connection.serverClosed;
+      }
+      return connection.alive && connection.toServer.length > 0;
+    }
+    case "cut":
+      return world.connections[event.connection]?.alive === true;
+    case "serverNotice": {
+      const connection = world.connections[event.connection];
+      return connection !== undefined && !connection.alive && connection.noticePending;
+    }
+    case "connect":
+      return world.clients[event.client]?.connection === null;
+    case "reload":
+      return world.clients[event.client] !== undefined;
+    case "act": {
+      const client = world.clients[event.client];
+      const guest = client ? world.guests[client.guestIndex] : undefined;
+      return guest !== undefined && guest.role !== "viewer";
+    }
+    case "command": {
+      const client = world.clients[event.client];
+      const guest = client ? world.guests[client.guestIndex] : undefined;
+      return (
+        client !== undefined &&
+        guest !== undefined &&
+        (guest.role === "owner" || guest.role === "facilitator") &&
+        client.connection !== null &&
+        client.core.inspect().status === "welcomed"
+      );
+    }
+    case "snapshot":
+    case "storeFault":
+      return true;
+    case "checkpoint":
+      return true;
+  }
 }

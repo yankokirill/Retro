@@ -1,15 +1,18 @@
 // CLI § 11.1 / § 9.3: путь нарушения (код 1) и внутренней ошибки (код 2).
 // На живой системе нарушений нет, поэтому runSimulation подменён.
 
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { SCHEDULER_VERSION, TRACE_VERSION } from "../src/config.js";
 import { createStats } from "../src/stats.js";
 import { violation } from "../src/violation.js";
 
 const run = vi.hoisted(() => ({ runSimulation: vi.fn() }));
 vi.mock("../src/run.js", () => run);
+const replay = vi.hoisted(() => ({ replayTrace: vi.fn() }));
+vi.mock("../src/replay.js", () => replay);
 
 import { main } from "../src/cli.js";
 
@@ -23,6 +26,7 @@ beforeEach(() => {
 afterEach(() => {
   vi.restoreAllMocks();
   run.runSimulation.mockReset();
+  replay.replayTrace.mockReset();
 });
 
 describe("CLI § 11.1 / § 9.3: нарушение свойства", () => {
@@ -72,5 +76,46 @@ describe("CLI § 11.1: внутренняя ошибка", () => {
     expect(code).toBe(2);
     expect(errors.join("\n")).toContain("внутренняя ошибка");
     expect(errors.join("\n")).toContain("boom");
+  });
+});
+
+describe("CLI § 9.2: --replay упавшей трассы", () => {
+  it("SIM-10 кр. 1: replay, упавший на нарушении, — код 1 и отчёт с свойством и шагом", async () => {
+    const stats = createStats();
+    stats.checkpoints = 3;
+    replay.replayTrace.mockResolvedValue({
+      ok: false,
+      violation: violation("S4", 42, "X_c ≠ proj_u(X_S)"),
+      applied: 10,
+      skipped: 2,
+      stats,
+    });
+    const dir = mkdtempSync(join(tmpdir(), "sim-cli-replay-fail-"));
+    try {
+      const path = join(dir, "trace.json");
+      writeFileSync(
+        path,
+        JSON.stringify({
+          version: TRACE_VERSION,
+          schedulerVersion: SCHEDULER_VERSION,
+          seed: 7,
+          config: {
+            clients: 3,
+            ops: 20,
+            profile: "default",
+            checkpointMin: 200,
+            checkpointMax: 800,
+          },
+          decisions: [{ kind: "cut", connection: 0 }],
+        }),
+      );
+      expect(await main([`--replay=${path}`])).toBe(1);
+      const report = errors.join("\n");
+      expect(report).toContain("SIM FAIL S4 at step 42, checkpoint 3");
+      expect(report).toContain("seed=7 profile=default clients=3 ops=20");
+      expect(report).toContain("выполнено=10 пропущено=2");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
