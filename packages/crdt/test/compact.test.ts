@@ -26,6 +26,7 @@ import {
   type Entry,
   editText,
   empty,
+  equals,
   type Key,
   materialize,
   merge,
@@ -206,6 +207,57 @@ describe("REQ-027 / I5: снапшот и журнал согласованы (�
       const replayed = viewSnapshot(materialize(merge(compact(before), after)));
       expect(replayed).toEqual(full);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SIM ВС-6 (docs/spec/simulator.md § 13): equals(compact(X), compact(Y)) —
+// точное (не только materialize) сравнение состояний, у одного из которых,
+// возможно, уже прошла компактизация (клиент получил снапшот), а у другого
+// ещё нет (оракульный X_S — полный журнал без снапшотов). Т5 в
+// `consistency-model.md` § 6/8 доказывает только материализованное
+// равенство после ⊔ (снапшот + хвост «≈ равны после materialize», строка
+// «восстановление» § 6) — структурное равенство после повторной
+// компактизации обеих сторон нигде не доказано и не является следствием I4.
+// Симулятору (S4) нужно именно оно: `equals` дешевле и строже, чем сравнение
+// View через `materialize` (ловит расхождения в скрытых компонентах —
+// голосах, supersedes,— которых materialize не показывает).
+// ---------------------------------------------------------------------------
+
+describe("SIM ВС-6: equals(compact(X), compact(Y)) как замена equals(X, Y) при снапшоте", () => {
+  it("equals: compact(merge(compact(X), Y)) равен compact(merge(X, Y)) для достижимых X, Y", () => {
+    fc.assert(
+      fc.property(
+        scenarioArb("vs6-x-entities", { minOps: 1, maxOps: 10 }),
+        voteScenarioArb("vs6-x-votes", { minOps: 0, maxOps: 6 }),
+        scenarioArb("vs6-y-entities", { minOps: 0, maxOps: 10 }),
+        voteScenarioArb("vs6-y-votes", { minOps: 0, maxOps: 6 }),
+        (xEntities, xVotes, yEntities, yVotes) => {
+          const x = combined(xEntities.merged, xVotes.merged);
+          const y = combined(yEntities.merged, yVotes.merged);
+
+          const viaPreCompact = compact(merge(compact(x), y));
+          const direct = compact(merge(x, y));
+
+          expect(equals(viaPreCompact, direct)).toBe(true);
+        },
+      ),
+      { numRuns: 100 },
+    );
+  });
+
+  it("equals: compact — идемпотентна (compact(compact(X)) равен compact(X))", () => {
+    fc.assert(
+      fc.property(
+        scenarioArb("vs6-idem-entities", { minOps: 1, maxOps: 12 }),
+        voteScenarioArb("vs6-idem-votes", { minOps: 0, maxOps: 6 }),
+        (entities, votesScenario) => {
+          const x = combined(entities.merged, votesScenario.merged);
+          expect(equals(compact(compact(x)), compact(x))).toBe(true);
+        },
+      ),
+      { numRuns: 100 },
+    );
   });
 });
 

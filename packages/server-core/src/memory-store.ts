@@ -46,6 +46,29 @@ export interface MemoryBoardStore extends BoardStore {
   failNextTransaction(afterWrites: number): void;
   /** Сырые строки журнала доски, по возрастанию `seq` — для оракула симулятора. */
   log(boardId: string): readonly OpRow[];
+  /**
+   * Дешёвые аналоги `log()` для симулятора (T-005): `log()` копирует весь журнал,
+   * а проверкам на каждое сообщение нужны число строк, хвост и строка по `seq`.
+   * Журнал только дописывается, `seq` по возрастанию.
+   */
+  logSize(boardId: string): number;
+  /** Строки журнала начиная с позиции `index` (0 — весь журнал). */
+  logFrom(boardId: string, index: number): readonly OpRow[];
+  /** Строка журнала с данным `seq` или `null` (двоичный поиск). */
+  opRowSync(boardId: string, seq: number): OpRow | null;
+  /**
+   * Синхронный аналог `board()` — только у адаптера в памяти (у Postgres
+   * такого не может быть, поэтому вне порта `BoardStore`). Нужен
+   * `packages/sim`: `checks.ts` объявлен синхронным (S2/S3/S4/... — не
+   * `Promise`, см. `docs/design/T-005-simulator.md` § 5.5), а свойства
+   * доски вроде `voteLimit` не меняются после создания — их можно
+   * прочитать разом с миром, не дожидаясь `await`.
+   */
+  boardSync(boardId: string): BoardRecord | null;
+  /** Синхронный аналог `latestSnapshot()` — тот же повод, что `boardSync` (S8). */
+  latestSnapshotSync(boardId: string): SnapshotRecord | null;
+  /** Синхронный аналог `currentState()` — тот же повод, что `boardSync` (S8). */
+  currentStateSync(boardId: string): ReplayResult;
 }
 
 export interface MemoryBoardStoreOptions {
@@ -95,6 +118,19 @@ interface BoardEntry {
   readonly actorClocks: Map<string, ActorClockState>;
   boardMaxLamport: number;
   snapshot: SnapshotRecord | null;
+  /**
+   * Кэш `computeCurrentState`: свёртка `snapshot ⊔ rows[0..folded)`. Строки
+   * только дописываются в хвост (seq выдаётся при коммите монотонно) и не
+   * удаляются, поэтому достаточно досвернуть `rows[folded..)`; смена
+   * `snapshot` кэш обнуляет. Сервер зовёт `currentState` на каждую операцию —
+   * без кэша это O(n) слияний на каждую, O(n²) на прогон.
+   */
+  current: {
+    readonly base: SnapshotRecord | null;
+    state: State;
+    folded: number;
+    uptoSeq: number;
+  } | null;
 }
 
 interface PendingFault {
@@ -196,6 +232,7 @@ class MemoryBoardStoreImpl implements MemoryBoardStore {
       actorClocks: new Map(),
       boardMaxLamport: 0,
       snapshot: null,
+      current: null,
     };
     entry.members.set(input.ownerId, { role: "owner", displayName: input.ownerName });
     this.boards.set(input.id, entry);
@@ -220,9 +257,30 @@ class MemoryBoardStoreImpl implements MemoryBoardStore {
     return entry ? entry.rows.map(toOpRow) : [];
   }
 
+  logSize(boardId: string): number {
+    return this.getEntry(boardId)?.rows.length ?? 0;
+  }
+
+  logFrom(boardId: string, index: number): readonly OpRow[] {
+    const entry = this.getEntry(boardId);
+    return entry ? entry.rows.slice(index).map(toOpRow) : [];
+  }
+
+  opRowSync(boardId: string, seq: number): OpRow | null {
+    const rows = this.getEntry(boardId)?.rows;
+    if (!rows) return null;
+    const index = firstIndexAfter(rows, seq - 1);
+    const row = rows[index];
+    return row && row.seq === seq ? toOpRow(row) : null;
+  }
+
   // --- Порт BoardStore: чтение -----------------------------------------
 
   async board(boardId: string): Promise<BoardRecord | null> {
+    return this.boardSync(boardId);
+  }
+
+  boardSync(boardId: string): BoardRecord | null {
     const entry = this.getEntry(boardId);
     if (!entry) return null;
     return { id: boardId, ...entry.record };
@@ -272,6 +330,11 @@ class MemoryBoardStoreImpl implements MemoryBoardStore {
   }
 
   async latestSnapshot(boardId: string): Promise<SnapshotRecord | null> {
+    return this.latestSnapshotSync(boardId);
+  }
+
+  /** Синхронный аналог `latestSnapshot()` — см. `boardSync`, тот же повод (S8, `packages/sim`). */
+  latestSnapshotSync(boardId: string): SnapshotRecord | null {
     return this.getEntry(boardId)?.snapshot ?? null;
   }
 
@@ -282,20 +345,34 @@ class MemoryBoardStoreImpl implements MemoryBoardStore {
    * операций в памяти и на Postgres должно совпадать именно в этой точке.
    */
   async currentState(boardId: string): Promise<ReplayResult> {
+    return this.currentStateSync(boardId);
+  }
+
+  /** Синхронный аналог `currentState()` — см. `boardSync`, тот же повод (S8, `packages/sim`). */
+  currentStateSync(boardId: string): ReplayResult {
     const entry = this.requireEntry(boardId);
     return this.computeCurrentState(entry);
   }
 
   private computeCurrentState(entry: BoardEntry): ReplayResult {
-    const baseline = entry.snapshot?.uptoSeq ?? 0;
-    const tail = entry.rows.slice(firstIndexAfter(entry.rows, baseline));
-    let state: State = entry.snapshot?.state ?? empty();
-    let uptoSeq = baseline;
-    for (const row of tail) {
-      state = merge(state, fromWire(row.delta));
-      uptoSeq = row.seq;
+    let cache = entry.current;
+    if (cache === null || cache.base !== entry.snapshot) {
+      const baseline = entry.snapshot?.uptoSeq ?? 0;
+      cache = {
+        base: entry.snapshot,
+        state: entry.snapshot?.state ?? empty(),
+        folded: firstIndexAfter(entry.rows, baseline),
+        uptoSeq: baseline,
+      };
+      entry.current = cache;
     }
-    return { state, uptoSeq };
+    for (; cache.folded < entry.rows.length; cache.folded++) {
+      // biome-ignore lint/style/noNonNullAssertion: folded < rows.length
+      const row = entry.rows[cache.folded]!;
+      cache.state = merge(cache.state, fromWire(row.delta));
+      cache.uptoSeq = row.seq;
+    }
+    return { state: cache.state, uptoSeq: cache.uptoSeq };
   }
 
   async authors(boardId: string): Promise<ReadonlyMap<EntityId, string>> {

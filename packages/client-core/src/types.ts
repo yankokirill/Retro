@@ -94,6 +94,8 @@ export interface ClientSnapshot {
   readonly confirmed: State;
   /** P — дельты, отправленные (или ждущие отправки), но ещё не подтверждённые, в порядке добавления. */
   readonly pending: readonly PendingEntry[];
+  /** X_c ⊔ ⨆P — состояние, из которого строится экран; считается по первому обращению и запоминается. */
+  readonly full: State;
   /** materialize(X_c ⊔ ⨆P) — то, что «на экране». */
   readonly view: View;
   /** Максимум `seq`, когда-либо полученный этим клиентом (в `welcome` или `op`); `null` — ничего не получал. */

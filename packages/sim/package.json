@@ -1,0 +1,28 @@
+{
+  "name": "@retro/sim",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "retro-sim": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "sim": "tsx src/cli.ts",
+    "sim:long": "node scripts/sim-long.mjs",
+    "test:sim": "node -e \"require('node:fs').rmSync('.coverage',{recursive:true,force:true})\" && vitest run --exclude test/coverage.test.ts && vitest run test/coverage.test.ts"
+  },
+  "dependencies": {
+    "@retro/client-core": "*",
+    "@retro/crdt": "*",
+    "@retro/protocol": "*",
+    "@retro/server-core": "*"
+  },
+  "devDependencies": {
+    "fast-check": "4.10.0",
+    "tsx": "4.20.4",
+    "vitest": "5.0.0"
+  }
+}

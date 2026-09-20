@@ -2,7 +2,7 @@
 // метода описано в JSDoc `types.ts`; этот файл — только код, следующий
 // этому контракту.
 
-import type { Clock, Dot, State } from "@retro/crdt";
+import type { Clock, Dot, State, View } from "@retro/crdt";
 import {
   assign,
   unvote as crdtUnvote,
@@ -17,6 +17,7 @@ import {
   fromWire,
   materialize,
   merge,
+  mergeAll,
   move,
   newClock,
   renameGroup,
@@ -126,6 +127,17 @@ function buildEntry(
   }
 }
 
+/**
+ * `confirmed ⊔ P`. Ожидающие дельты сначала объединяются между собой (они
+ * маленькие) и только потом одним слиянием с `confirmed`: `merge`
+ * ассоциативен и коммутативен, результат тот же, а копий большого состояния
+ * не k, а одна.
+ */
+function withPending(confirmed: State, pending: readonly PendingEntry[]): State {
+  if (pending.length === 0) return confirmed;
+  return mergeAll([confirmed, ...pending.map((entry) => fromWire(entry.delta))]);
+}
+
 function dotEquals(a: Dot, b: Dot): boolean {
   return a.actor === b.actor && a.counter === b.counter;
 }
@@ -205,10 +217,20 @@ export function createSyncClient(config: SyncClientConfig, ports: ClientCorePort
   let voterToken: string | null = null;
   let rejections: Rejection[] = [];
 
+  // X_c ⊔ ⨆P, мемо по идентичности confirmed/pending (оба только заменяются).
+  // Одно и то же состояние нужно экрану (view), очередному `act` и проверкам
+  // симулятора — копировать большое состояние три раза на действие незачем.
+  let fullCache: { confirmed: State; pending: readonly PendingEntry[]; state: State } | null = null;
+
+  function fullOf(c: State, p: readonly PendingEntry[]): State {
+    if (fullCache === null || fullCache.confirmed !== c || fullCache.pending !== p) {
+      fullCache = { confirmed: c, pending: p, state: withPending(c, p) };
+    }
+    return fullCache.state;
+  }
+
   function viewState(): State {
-    let acc = confirmed;
-    for (const entry of pending) acc = merge(acc, fromWire(entry.delta));
-    return acc;
+    return fullOf(confirmed, pending);
   }
 
   function saveOutbox(): void {
@@ -327,14 +349,18 @@ export function createSyncClient(config: SyncClientConfig, ports: ClientCorePort
     role = msg.role;
     voterToken = msg.voterToken;
     meta = msg.meta;
+    // Всё содержимое welcome — одним слиянием: по одной дельте это копия
+    // растущего состояния на каждую строку журнала (O(k²) на длинной досылке).
+    const incoming: State[] = [];
     if (msg.snapshot) {
-      confirmed = merge(confirmed, fromWire(msg.snapshot.state));
+      incoming.push(fromWire(msg.snapshot.state));
       lastSeq = lastSeq === null ? msg.snapshot.upToSeq : Math.max(lastSeq, msg.snapshot.upToSeq);
     }
     for (const row of msg.ops) {
-      confirmed = merge(confirmed, fromWire(row.delta));
+      incoming.push(fromWire(row.delta));
       lastSeq = lastSeq === null ? row.seq : Math.max(lastSeq, row.seq);
     }
+    if (incoming.length > 0) confirmed = mergeAll([confirmed, ...incoming]);
     status = "welcomed";
     return pending.map((entry) => JSON.stringify({ type: "op", delta: entry.delta }));
   }
@@ -366,12 +392,36 @@ export function createSyncClient(config: SyncClientConfig, ports: ClientCorePort
     }
   }
 
+  // Мемо view по идентичности confirmed/pending: оба только заменяются, не
+  // мутируются, так что совпадение ссылок = то же состояние.
+  let viewCache: { confirmed: State; pending: readonly PendingEntry[]; view: View } | null = null;
+
   function inspect(): ClientSnapshot {
+    // view — по первому обращению: это дорогая материализация, а большинству
+    // вызывающих (симулятор, проверки) нужны только confirmed/pending.
+    const snapshotConfirmed = confirmed;
+    const snapshotPending = pending;
     return {
       actorId,
-      confirmed,
-      pending,
-      view: materialize(viewState()),
+      confirmed: snapshotConfirmed,
+      pending: snapshotPending,
+      get full(): State {
+        return fullOf(snapshotConfirmed, snapshotPending);
+      },
+      get view(): View {
+        if (
+          viewCache === null ||
+          viewCache.confirmed !== snapshotConfirmed ||
+          viewCache.pending !== snapshotPending
+        ) {
+          viewCache = {
+            confirmed: snapshotConfirmed,
+            pending: snapshotPending,
+            view: materialize(fullOf(snapshotConfirmed, snapshotPending)),
+          };
+        }
+        return viewCache.view;
+      },
       lastSeq,
       status,
       role,

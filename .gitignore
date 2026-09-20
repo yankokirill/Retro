@@ -11,3 +11,5 @@ coverage/
 *.tsbuildinfo
 .vite/
 .claude/scheduled_tasks.lock
+packages/sim/.coverage/
+.sim/
