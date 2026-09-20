@@ -6,7 +6,7 @@
 // проверки, без предположений о внутренностях `World`, кроме его публичной
 // формы (world.ts).
 
-import type { Dot, EntityId, State, View, WireDelta } from "@retro/crdt";
+import type { Dot, EntityId, State, View, Vote, WireDelta } from "@retro/crdt";
 import { activeVotes, compact, dotKey, equals, fromWire, materialize, merge } from "@retro/crdt";
 import type { Phase, RejectReason } from "@retro/protocol";
 import { clientMessageSchema, operationDot, serverMessageSchema } from "@retro/protocol";
@@ -341,6 +341,20 @@ export function checkReject(
   return null;
 }
 
+/** Голос `vote` есть в журнале (оракуле) — сравнение по `(dot, target)`. */
+function inJournal(world: World, vote: Vote): boolean {
+  for (const known of world.oracle.x.votes.values()) {
+    if (
+      known.dot.actor === vote.dot.actor &&
+      known.dot.counter === vote.dot.counter &&
+      known.target === vote.target
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /** В покое: у каждого клиента confirmed/pending не содержат dot из его же rejections (§ 8 таблица S7, «в покое»). */
 export function checkNoRejectedResidue(world: World, step: number): Violation | null {
   for (const client of world.clients) {
@@ -368,7 +382,12 @@ export function checkNoRejectedResidue(world: World, step: number): Violation | 
       }
     }
     for (const vote of snapshot.confirmed.votes.values()) {
-      if (rejectedDots.has(dotKey(vote.dot))) {
+      // dot `unvote` = dot отзываемого голоса (ADR-0010): отказ на `unvote`
+      // законно оставляет в `rejections` dot голоса, который при этом честно
+      // лежит в `confirmed`. Из одной записи `Rejection` (без вида дельты)
+      // это не отличить, поэтому остаток отклонённого голоса — только тот, что
+      // отсутствует в журнале: подтверждённый `ack` голос всегда в X_S.
+      if (rejectedDots.has(dotKey(vote.dot)) && !inJournal(world, vote)) {
         return violation(
           "S7",
           step,

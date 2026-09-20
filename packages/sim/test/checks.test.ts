@@ -824,6 +824,68 @@ describe("SIM-08 / S7: checkNoRejectedResidue — в покое dot из rejecti
   });
 });
 
+describe("SIM-08 / S7: остаток отклонённого голоса и ADR-0010 (dot unvote = dot голоса)", () => {
+  function worldWithVote(inJournal: boolean) {
+    const store = makeStoreWithBoard();
+    const server = makeServer(store);
+    const sticker = createSticker(empty(), newClock(ACTOR_OWNER), {
+      column: "start",
+      frac: "m",
+      text: "s",
+      color: "yellow",
+    });
+    const voted = vote(
+      sticker.delta,
+      sticker.clock,
+      sticker.dot.actor + ":" + sticker.dot.counter,
+      OWNER_ID,
+    );
+    const known: State = merge(sticker.delta, voted.delta);
+    const fakeClient = {
+      connected: () => [],
+      receive: () => [],
+      disconnected: () => {},
+      act: () => ({ ok: false as const, reason: "invalid_intent" as const }),
+      command: () => [],
+      inspect: () => ({
+        actorId: ACTOR_OWNER,
+        confirmed: known,
+        pending: [],
+        view: materialize(known),
+        lastSeq: null,
+        status: "welcomed" as const,
+        role: "owner" as const,
+        meta: null,
+        voterToken: null,
+        // отказ на unvote этого голоса несёт dot самого голоса (ADR-0010)
+        rejections: [{ dot: voted.dot, reason: "wrong_phase" as RejectReason }],
+      }),
+    };
+    return baseWorld(store, server, {
+      guests: [{ id: OWNER_ID, role: "owner", displayName: "Owner" }],
+      clients: [
+        {
+          guestIndex: 0,
+          core: fakeClient,
+          outbox: createMemoryOutboxStore() as never,
+          connection: null,
+        },
+      ],
+      oracle: { x: inJournal ? known : sticker.delta, lastFoldedSeq: 0, stickerAuthor: new Map() },
+    });
+  }
+
+  it("SIM-08 / S7: отказ на unvote при подтверждённом (в журнале) голосе того же dot — нет нарушения", () => {
+    expect(checkNoRejectedResidue(worldWithVote(true), 1)).toBeNull();
+  });
+
+  it("SIM-08 / S7: голос с dot из rejections в confirmed, но не в журнале (выдуманный ack) — нарушение", () => {
+    const violation = checkNoRejectedResidue(worldWithVote(false), 1);
+    expect(violation).not.toBeNull();
+    expect(violation?.property).toBe("S7");
+  });
+});
+
 // ---------------------------------------------------------------------------
 // S8 — checkSnapshotConsistency: I5.
 // ---------------------------------------------------------------------------
