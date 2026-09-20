@@ -92,6 +92,24 @@ describe("SIM-10 кр. 1: воспроизведение трассы упавш
     expect(replay.skipped).toBeGreaterThan(0);
   });
 
+  it("SIM-10 § 9.2: действие над сущностью, которой клиент не знает, пропускается (минимизация не должна выдумывать недопустимый ввод)", async () => {
+    const config = configOf(3, 10);
+    // Клиент 0 ни разу не подключался и ничего не создавал: цели «nope:1» для него не существует.
+    const decisions = [
+      { kind: "act", client: 0, intent: { type: "editText", id: "nope:1", text: "x" } },
+      { kind: "act", client: 0, intent: { type: "setGroup", id: "nope:2", group: "nope:3" } },
+      { kind: "act", client: 0, intent: { type: "vote", target: "nope:4" } },
+      {
+        kind: "act",
+        client: 0,
+        intent: { type: "createGroup", column: "start", frac: "a", title: "g" },
+      },
+    ] as const;
+    const replay = await replayTrace(traceOf(config, decisions as never));
+    expect(replay.skipped, "три действия над неизвестными сущностями пропущены").toBe(3);
+    expect(replay.applied, "создание группы — применимо").toBe(1);
+  });
+
   it("SIM-10: схема версий (ВС-9) — чужой формат отвергается, иная версия планировщика проигрывается", async () => {
     const config = configOf(3, 100);
     const run = await runSimulation(config);
