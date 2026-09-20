@@ -19,7 +19,7 @@
 
 import type { Intent, PendingEntry } from "@retro/client-core";
 import type { CardView, Color, Column, EntityId, GroupView, State, View } from "@retro/crdt";
-import { activeVotes, empty, fromWire, merge } from "@retro/crdt";
+import { activeVotes, empty, entityKind, fromWire, merge } from "@retro/crdt";
 import type { Command, Phase } from "@retro/protocol";
 import { checkPermission, checkVotePermission, type StickerAction } from "@retro/server-core";
 import type { Prng } from "./prng.js";
@@ -225,11 +225,29 @@ export function generateIntent(world: World, clientIndex: number, prng: Prng): I
     ]);
   }
 
-  if (screen.trash.length > 0) {
+  // restore гейтится как editSticker (classifyAction), но только для стикеров:
+  // группы T-011 не гейтит. Участнику предлагаем лишь то, что интерфейс дал бы
+  // восстановить — свои стикеры и группы (авторство стикера — по оракулу; у
+  // ещё не подтверждённого своего стикера оно неизвестно, его пропускаем).
+  let restorableIds: readonly EntityId[] = screen.trash;
+  if (!permitted("restore", false)) {
+    const canRestoreOwn = permitted("restore", true);
+    let withPending: State | null = null;
+    restorableIds = screen.trash.filter((id) => {
+      let kind = entityKind(snapshot.confirmed, id);
+      if (kind === undefined) {
+        withPending ??= merge(snapshot.confirmed, pendingState(snapshot.pending));
+        kind = entityKind(withPending, id);
+      }
+      if (kind === "group") return true;
+      return canRestoreOwn && world.oracle.stickerAuthor.get(id) === guest.id;
+    });
+  }
+  if (restorableIds.length > 0) {
     candidates.push([
       "restore",
       weightOf("restore"),
-      () => ({ type: "restore", id: mustPick(prng, [...screen.trash], hot, world.recent) }),
+      () => ({ type: "restore", id: mustPick(prng, restorableIds, hot, world.recent) }),
     ]);
   }
 
