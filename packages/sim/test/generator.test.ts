@@ -103,6 +103,15 @@ describe("SIM-06: генератор не подделывает операци�
         }
         expect(result.ok, `profile=${profile} seed=${seed}`).toBe(true);
         expect(result.stats.maxMessageBytes.toServer).toBeGreaterThan(0);
+        // S11 действительно вызывалась и на сообщениях клиента, и на сообщениях сервера
+        expect(
+          result.stats.schemaChecked.toServer,
+          `profile=${profile} seed=${seed}`,
+        ).toBeGreaterThan(0);
+        expect(
+          result.stats.schemaChecked.toClient,
+          `profile=${profile} seed=${seed}`,
+        ).toBeGreaterThan(0);
       }, 120_000);
     }
   }

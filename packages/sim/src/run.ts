@@ -147,6 +147,7 @@ async function step(
   for (const sent of observation.sentRaw) {
     const violation = checkMessageSchema(sent.direction, sent.raw, world.acts);
     if (violation) return violation;
+    world.stats.schemaChecked[sent.direction] += 1;
   }
   return null;
 }

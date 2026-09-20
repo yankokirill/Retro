@@ -58,6 +58,8 @@ export interface Stats {
   maxPending: number;
   maxMessageBytes: MessageSizeStats;
   lostAfterCut: number;
+  /** Сколько сообщений реально прошло проверку схемы S11 (SIM-06 кр. 2: «проверка не пуста»). */
+  schemaChecked: MessageSizeStats;
   readonly coverage: CoverageStats;
   readonly faultCoverage: FaultCoverageStats;
 }
@@ -80,6 +82,7 @@ export function createStats(): Stats {
     maxPending: 0,
     maxMessageBytes: { toServer: 0, toClient: 0 },
     lostAfterCut: 0,
+    schemaChecked: { toServer: 0, toClient: 0 },
     coverage: {
       revealWithDisconnectedMissingStickers: false,
       conflictAtCheckpoint: false,
