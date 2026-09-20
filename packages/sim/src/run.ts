@@ -99,8 +99,11 @@ function chooseEvent(world: World, candidates: readonly Candidate[], prng: Prng)
     ).map((k) => [k, eventWeight(world, k)] as const);
     const totalWeight = weighted.reduce((sum, [, w]) => sum + w, 0);
 
-    const kinds = [...remainingKinds];
-    const kind = totalWeight > 0 ? prng.pick(weighted) : kinds[prng.int(0, kinds.length - 1)];
+    // Виды с нулевым весом профиль отключил (storeFault вне `faults`, snapshot в `reveal`):
+    // равномерный выбор среди них нарушил бы профиль. Если положительных не осталось —
+    // мир не может сделать ни шага, прогон завершается как есть.
+    if (totalWeight <= 0) return null;
+    const kind = prng.pick(weighted);
     if (kind === undefined) return null;
 
     const pool = candidates.filter((c) => c.kind === kind);

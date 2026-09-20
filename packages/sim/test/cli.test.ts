@@ -39,6 +39,22 @@ describe("CLI § 11.1: разбор флагов", () => {
   it("CLI § 11.1: неизвестный флаг — ошибка разбора", () => {
     expect(parseCliArgs(["--bogus"]).ok).toBe(false);
   });
+
+  it("CLI § 11.1: числовые флаги разбираются строго — 12abc, 1e4, 5.9, -1 не принимаются", () => {
+    for (const bad of [
+      "--seed=12abc",
+      "--ops=1e4",
+      "--clients=5.9",
+      "--seed=-1",
+      "--ops=",
+      "--checkpoint-min=x",
+    ]) {
+      const parsed = parseCliArgs([bad]);
+      expect(parsed.ok, bad).toBe(false);
+    }
+    const good = parseCliArgs(["--seed=0", "--ops=10000", "--clients=20"]);
+    expect(good.ok).toBe(true);
+  });
 });
 
 describe("CLI § 11.1: прогон и коды выхода", () => {

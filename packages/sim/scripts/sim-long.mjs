@@ -6,6 +6,7 @@
 //   npm run sim:long [-- --seeds=20 --ops=10000 --concurrency=8 --clients=5,20]
 
 import { spawn } from "node:child_process";
+import { rmSync } from "node:fs";
 import { availableParallelism } from "node:os";
 import { parseArgs } from "node:util";
 
@@ -33,6 +34,9 @@ for (const profile of PROFILES) {
 
 function run({ profile, clients, seed }) {
   return new Promise((resolve) => {
+    // Имя учитывает профиль и число клиентов: по умолчанию CLI пишет .sim/fail-<seed>.json,
+    // и разные прогоны с одним seed затирали бы трассы друг друга.
+    const tracePath = `.sim/long-${profile}-${clients}-${seed}.json`;
     const args = [
       "--import",
       "tsx",
@@ -42,13 +46,17 @@ function run({ profile, clients, seed }) {
       `--ops=${values.ops}`,
       `--seed=${seed}`,
       "--quiet",
-      `--trace=.sim/long-fail-${profile}-${clients}-${seed}.json`,
+      `--trace=${tracePath}`,
     ];
     const child = spawn(process.execPath, args, { stdio: ["ignore", "pipe", "pipe"] });
     let output = "";
     child.stdout.on("data", (chunk) => (output += chunk));
     child.stderr.on("data", (chunk) => (output += chunk));
-    child.on("close", (code) => resolve({ code, output: output.trim() }));
+    child.on("close", (code) => {
+      // --trace пишет трассу и при успехе; оставляем только трассы упавших прогонов.
+      if (code === 0) rmSync(tracePath, { force: true });
+      resolve({ code, output: output.trim() });
+    });
   });
 }
 

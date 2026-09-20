@@ -6,8 +6,10 @@
 // В T-005 — только режим прогона (`run`). `--replay`/`--minimize` (SIM-10) —
 // T-027 (docs/tasks.md § 7.1); здесь эти флаги ещё не разбираются.
 
+import { realpathSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
+import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import {
   buildConfig,
@@ -65,18 +67,33 @@ export function parseCliArgs(argv: readonly string[]): ParseResult {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
 
-  const toInt = (raw: string | undefined, fallback: number): number =>
-    raw === undefined ? fallback : Number.parseInt(raw, 10);
+  // Строго: `Number.parseInt("12abc")` = 12, а `--ops=1e4` = 1 — опечатка в seed давала бы
+  // другой, но «валидный» прогон без единого сообщения.
+  const invalid: string[] = [];
+  const toInt = (flag: string, raw: string | undefined, fallback: number): number => {
+    if (raw === undefined) return fallback;
+    if (!/^\d+$/.test(raw)) {
+      invalid.push(`--${flag} must be a non-negative integer, got ${JSON.stringify(raw)}`);
+      return fallback;
+    }
+    return Number(raw);
+  };
+  const seed = values.seed === undefined ? undefined : toInt("seed", values.seed, 0);
+  const clients = toInt("clients", values.clients, DEFAULT_CLIENTS);
+  const ops = toInt("ops", values.ops, DEFAULT_OPS);
+  const checkpointMin = toInt("checkpoint-min", values["checkpoint-min"], DEFAULT_CHECKPOINT_MIN);
+  const checkpointMax = toInt("checkpoint-max", values["checkpoint-max"], DEFAULT_CHECKPOINT_MAX);
+  if (invalid.length > 0) return { ok: false, error: invalid.join("; ") };
 
   return {
     ok: true,
     args: {
-      seed: values.seed === undefined ? undefined : Number.parseInt(values.seed, 10),
-      clients: toInt(values.clients, DEFAULT_CLIENTS),
-      ops: toInt(values.ops, DEFAULT_OPS),
+      seed,
+      clients,
+      ops,
       profile: values.profile ?? DEFAULT_PROFILE_NAME,
-      checkpointMin: toInt(values["checkpoint-min"], DEFAULT_CHECKPOINT_MIN),
-      checkpointMax: toInt(values["checkpoint-max"], DEFAULT_CHECKPOINT_MAX),
+      checkpointMin,
+      checkpointMax,
       trace: values.trace,
       quiet: values.quiet ?? false,
     },
@@ -208,8 +225,20 @@ export async function main(argv: readonly string[]): Promise<number> {
   return 1;
 }
 
-// Точка входа — не выполняется при импорте модуля из тестов.
-if (import.meta.url === `file://${process.argv[1]}`) {
+// Точка входа — не выполняется при импорте модуля из тестов. Сравнение идёт по реальному
+// пути (`realpath`) и через `pathToFileURL`: `bin` запускается через симлинк в
+// node_modules/.bin, а путь с пробелом или не-ASCII в `import.meta.url` закодирован.
+function isEntryPoint(): boolean {
+  const entry = process.argv[1];
+  if (entry === undefined) return false;
+  try {
+    return import.meta.url === pathToFileURL(realpathSync(entry)).href;
+  } catch {
+    return false;
+  }
+}
+
+if (isEntryPoint()) {
   main(process.argv.slice(2)).then((code) => {
     process.exitCode = code;
   });

@@ -7,7 +7,16 @@
 // формы (world.ts).
 
 import type { Dot, EntityId, State, View, Vote, WireDelta } from "@retro/crdt";
-import { activeVotes, compact, dotKey, equals, fromWire, materialize, merge } from "@retro/crdt";
+import {
+  activeVotes,
+  compact,
+  dotKey,
+  empty,
+  equals,
+  fromWire,
+  materialize,
+  merge,
+} from "@retro/crdt";
 import type { Phase, RejectReason } from "@retro/protocol";
 import { clientMessageSchema, operationDot, serverMessageSchema } from "@retro/protocol";
 import type { OpRow } from "@retro/server-core";
@@ -175,6 +184,17 @@ export function checkClientsMatchOracle(world: World, step: number): Violation |
 
 export function checkScreensAgree(world: World, step: number): Violation | null {
   const phase = boardPhase(world);
+  // Экран каждого клиента считается один раз (материализация — O(состояния)), а не на каждую пару.
+  const views: (string | undefined)[] = [];
+  const viewOf = (index: number): string => {
+    let view = views[index];
+    if (view === undefined) {
+      const client = world.clients[index];
+      view = canonicalView(materialize(client ? client.core.inspect().confirmed : empty()));
+      views[index] = view;
+    }
+    return view;
+  };
   for (let i = 0; i < world.clients.length; i++) {
     for (let j = i + 1; j < world.clients.length; j++) {
       const ci = world.clients[i];
@@ -184,9 +204,7 @@ export function checkScreensAgree(world: World, step: number): Violation | null 
       const gj = world.guests[cj.guestIndex];
       if (!gi || !gj) continue;
       if (!visibleSame(world.oracle.x, phase, world.oracle.stickerAuthor, gi.id, gj.id)) continue;
-      const vi = canonicalView(materialize(ci.core.inspect().confirmed));
-      const vj = canonicalView(materialize(cj.core.inspect().confirmed));
-      if (vi !== vj) {
+      if (viewOf(i) !== viewOf(j)) {
         return violation(
           "S5",
           step,
@@ -197,10 +215,10 @@ export function checkScreensAgree(world: World, step: number): Violation | null 
   }
   if (phase !== "collect") {
     const expected = canonicalView(materialize(world.oracle.x));
-    for (const client of world.clients) {
-      const guest = world.guests[client.guestIndex];
-      const actual = canonicalView(materialize(client.core.inspect().confirmed));
-      if (actual !== expected) {
+    for (let index = 0; index < world.clients.length; index++) {
+      const client = world.clients[index];
+      const guest = client ? world.guests[client.guestIndex] : undefined;
+      if (viewOf(index) !== expected) {
         return violation(
           "S5",
           step,
