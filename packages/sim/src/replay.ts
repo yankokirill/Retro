@@ -23,6 +23,10 @@ export interface ReplayResult {
   readonly applied: number;
   /** Сколько решений пропущено как неприменимые в этом мире (§ 9.2). */
   readonly skipped: number;
+  /** Сколько решений трассы разобрано, включая то, на котором найдено нарушение (для обрезки хвоста). */
+  readonly consumed: number;
+  /** Номера пропущенных решений: они ничего не изменили, минимизация выбрасывает их даром. */
+  readonly skippedIndexes: readonly number[];
   readonly stats: Stats;
 }
 
@@ -42,9 +46,20 @@ export async function replayTrace(
   const wellFormedState = createWellFormedState();
 
   let applied = 0;
-  let skipped = 0;
+  const skippedIndexes: number[] = [];
+  const result = (consumed: number, violation?: Violation): ReplayResult => ({
+    ok: violation === undefined,
+    ...(violation ? { violation } : {}),
+    applied,
+    skipped: skippedIndexes.length,
+    consumed,
+    skippedIndexes,
+    stats: world.stats,
+  });
 
-  for (const event of trace.decisions) {
+  for (let index = 0; index < trace.decisions.length; index++) {
+    const event = trace.decisions[index];
+    if (!event) continue;
     if (event.kind === "checkpoint") {
       // Отметка контрольной точки. Записанная досылка уже выполнена решениями; на той же сборке
       // каналы пусты, и `drain` ничего не делает — остаётся исход (S9) и проверки покоя. На
@@ -54,11 +69,11 @@ export async function replayTrace(
       const violation =
         (await drain(world, streams, [], (next) => step(world, next, wellFormedState))) ??
         checkpointChecks(world);
-      if (violation) return { ok: false, violation, applied, skipped, stats: world.stats };
+      if (violation) return result(index + 1, violation);
       continue;
     }
     if (!isApplicable(world, event)) {
-      skipped += 1;
+      skippedIndexes.push(index);
       continue;
     }
 
@@ -71,12 +86,12 @@ export async function replayTrace(
       // отвергает исключением. Для остальных решений исключение — настоящая ошибка, не пропуск.
       if (event.kind !== "act") throw error;
       world.acts = actsBefore;
-      skipped += 1;
+      skippedIndexes.push(index);
       continue;
     }
     applied += 1;
-    if (violation) return { ok: false, violation, applied, skipped, stats: world.stats };
+    if (violation) return result(index + 1, violation);
   }
 
-  return { ok: true, applied, skipped, stats: world.stats };
+  return result(trace.decisions.length);
 }

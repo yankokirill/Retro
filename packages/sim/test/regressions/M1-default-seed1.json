@@ -1,0 +1,16 @@
+{
+  "version": 3,
+  "schedulerVersion": 3,
+  "seed": 1,
+  "config": {
+    "clients": 5,
+    "ops": 400,
+    "profile": "default",
+    "checkpointMin": 200,
+    "checkpointMax": 800
+  },
+  "decisions": [
+    { "kind": "act", "client": 4, "intent": { "type": "createAction", "text": "zeta" } },
+    { "kind": "checkpoint" }
+  ]
+}
