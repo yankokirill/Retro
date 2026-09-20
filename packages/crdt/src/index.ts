@@ -90,17 +90,20 @@ export function newClock(actor: ActorId): Clock {
 function union<T>(a: ReadonlyMap<string, T>, b: ReadonlyMap<string, T>): ReadonlyMap<string, T> {
   if (b.size === 0) return a;
   if (a.size === 0) return b;
-  const result = new Map(a);
+  // Копия `a` — только при первом реальном изменении: повторная доставка и
+  // дубли (b ⊆ a) не должны стоить O(|a|).
+  let result: Map<string, T> | null = null;
   for (const [id, element] of b) {
-    const existing = result.get(id);
+    const existing = (result ?? a).get(id);
     if (
       existing === undefined ||
       (existing !== element && canonical(element) > canonical(existing))
     ) {
+      result ??= new Map(a);
       result.set(id, element);
     }
   }
-  return result;
+  return result ?? a;
 }
 
 /**
@@ -449,17 +452,48 @@ function compareOrder(
   return compareDots(entityDot(a.id), entityDot(b.id));
 }
 
-function textValues(state: State, id: EntityId, field: "text" | "title"): string[] {
-  return values(state, { entity: id, field }) as string[];
+/**
+ * Индекс для одного вызова `materialize`: те же `visible`/`activeVotes`, но
+ * группировка записей по ячейке и голосов по цели строится за один проход,
+ * а не сканом всех `entries`/`votes` на каждую сущность×поле (O(n²)).
+ * Результаты совпадают с `visible`/`winner`/`values`/`activeVotes` (M1).
+ */
+function buildLookup(state: State): {
+  visibleOf: (entity: EntityId, field: string) => Entry[];
+  votesOf: (id: EntityId) => number;
+} {
+  const cells = new Map<string, Entry[]>();
+  for (const entry of state.entries.values()) {
+    if (state.supersedes.has(cellDotIdentity(entry.key, entry.dot))) continue;
+    const cellKey = `${entry.key.entity}\u0000${entry.key.field}`;
+    const list = cells.get(cellKey);
+    if (list) list.push(entry);
+    else cells.set(cellKey, [entry]);
+  }
+  for (const list of cells.values()) list.sort(byStampDescending);
+
+  const voteCounts = new Map<EntityId, number>();
+  for (const vote of state.votes.values()) {
+    if (state.unvotes.has(identity(vote.dot.actor, vote.dot.counter, vote.target))) continue;
+    voteCounts.set(vote.target, (voteCounts.get(vote.target) ?? 0) + 1);
+  }
+
+  return {
+    visibleOf: (entity, field) => cells.get(`${entity}\u0000${field}`) ?? [],
+    votesOf: (id) => voteCounts.get(id) ?? 0,
+  };
 }
 
 export function materialize(state: State): View {
   const kindOf = new Map<EntityId, Kind>();
   for (const created of state.created.values()) kindOf.set(created.id, created.kind);
 
-  const isDeleted = (id: EntityId): boolean =>
-    winner(state, { entity: id, field: "deleted" })?.value === true;
-  const votesOf = (id: EntityId): number => activeVotes(state, id).length;
+  const { visibleOf, votesOf } = buildLookup(state);
+  const winnerOf = (entity: EntityId, field: string): Entry | undefined =>
+    visibleOf(entity, field)[0];
+  const textValues = (entity: EntityId, field: "text" | "title"): string[] =>
+    visibleOf(entity, field).map((entry) => entry.value) as string[];
+  const isDeleted = (id: EntityId): boolean => winnerOf(id, "deleted")?.value === true;
 
   const trash: EntityId[] = [];
   const actions: ActionView[] = [];
@@ -479,10 +513,9 @@ export function materialize(state: State): View {
 
     if (kind === "action") {
       if (isDeleted(id)) continue; // R1: удалённый action item — не в actions и не в trash (см. JSDoc View)
-      const text = textValues(state, id, "text");
-      const assignee = (winner(state, { entity: id, field: "assignee" })?.value ??
-        null) as UserId | null;
-      const done = winner(state, { entity: id, field: "done" })?.value === true;
+      const text = textValues(id, "text");
+      const assignee = (winnerOf(id, "assignee")?.value ?? null) as UserId | null;
+      const done = winnerOf(id, "done")?.value === true;
       actions.push({ id, text, conflict: text.length > 1, assignee, done });
       continue;
     }
@@ -492,22 +525,19 @@ export function materialize(state: State): View {
       continue;
     }
 
-    const place = winner(state, { entity: id, field: "place" })?.value as Place;
+    const place = winnerOf(id, "place")?.value as Place;
 
     if (kind === "group") {
-      const title = textValues(state, id, "title");
+      const title = textValues(id, "title");
       groupMeta.set(id, { title, conflict: title.length > 1, votes: votesOf(id), place });
       continue;
     }
 
-    const text = textValues(state, id, "text");
-    const color = winner(state, { entity: id, field: "color" })?.value as Color;
+    const text = textValues(id, "text");
+    const color = winnerOf(id, "color")?.value as Color;
     const card: CardView = { id, text, conflict: text.length > 1, color, votes: votesOf(id) };
 
-    const groupField = winner(state, { entity: id, field: "group" })?.value as
-      | EntityId
-      | null
-      | undefined;
+    const groupField = winnerOf(id, "group")?.value as EntityId | null | undefined;
     // R3: эффективная группа — только существующая, невыудалённая сущность вида group.
     const effectiveGroup =
       groupField != null && kindOf.get(groupField) === "group" && !isDeleted(groupField)

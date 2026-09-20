@@ -2,7 +2,7 @@
 // метода описано в JSDoc `types.ts`; этот файл — только код, следующий
 // этому контракту.
 
-import type { Clock, Dot, State } from "@retro/crdt";
+import type { Clock, Dot, State, View } from "@retro/crdt";
 import {
   assign,
   unvote as crdtUnvote,
@@ -126,6 +126,18 @@ function buildEntry(
   }
 }
 
+/**
+ * `confirmed ⊔ P`. Ожидающие дельты сначала объединяются между собой (они
+ * маленькие) и только потом одним слиянием с `confirmed`: `merge`
+ * ассоциативен и коммутативен, результат тот же, а копий большого состояния
+ * не k, а одна.
+ */
+function withPending(confirmed: State, pending: readonly PendingEntry[]): State {
+  let deltas = empty();
+  for (const entry of pending) deltas = merge(deltas, fromWire(entry.delta));
+  return merge(confirmed, deltas);
+}
+
 function dotEquals(a: Dot, b: Dot): boolean {
   return a.actor === b.actor && a.counter === b.counter;
 }
@@ -206,9 +218,7 @@ export function createSyncClient(config: SyncClientConfig, ports: ClientCorePort
   let rejections: Rejection[] = [];
 
   function viewState(): State {
-    let acc = confirmed;
-    for (const entry of pending) acc = merge(acc, fromWire(entry.delta));
-    return acc;
+    return withPending(confirmed, pending);
   }
 
   function saveOutbox(): void {
@@ -366,12 +376,35 @@ export function createSyncClient(config: SyncClientConfig, ports: ClientCorePort
     }
   }
 
+  // Мемо view по идентичности confirmed/pending: оба только заменяются, не
+  // мутируются, так что совпадение ссылок = то же состояние.
+  let viewCache: { confirmed: State; pending: readonly PendingEntry[]; view: View } | null = null;
+
   function inspect(): ClientSnapshot {
+    // view — по первому обращению: это дорогая материализация, а большинству
+    // вызывающих (симулятор, проверки) нужны только confirmed/pending.
+    const snapshotConfirmed = confirmed;
+    const snapshotPending = pending;
     return {
       actorId,
-      confirmed,
-      pending,
-      view: materialize(viewState()),
+      confirmed: snapshotConfirmed,
+      pending: snapshotPending,
+      get view(): View {
+        if (
+          viewCache === null ||
+          viewCache.confirmed !== snapshotConfirmed ||
+          viewCache.pending !== snapshotPending
+        ) {
+          let acc = snapshotConfirmed;
+          for (const entry of snapshotPending) acc = merge(acc, fromWire(entry.delta));
+          viewCache = {
+            confirmed: snapshotConfirmed,
+            pending: snapshotPending,
+            view: materialize(acc),
+          };
+        }
+        return viewCache.view;
+      },
       lastSeq,
       status,
       role,

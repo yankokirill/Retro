@@ -108,6 +108,19 @@ interface BoardEntry {
   readonly actorClocks: Map<string, ActorClockState>;
   boardMaxLamport: number;
   snapshot: SnapshotRecord | null;
+  /**
+   * Кэш `computeCurrentState`: свёртка `snapshot ⊔ rows[0..folded)`. Строки
+   * только дописываются в хвост (seq выдаётся при коммите монотонно) и не
+   * удаляются, поэтому достаточно досвернуть `rows[folded..)`; смена
+   * `snapshot` кэш обнуляет. Сервер зовёт `currentState` на каждую операцию —
+   * без кэша это O(n) слияний на каждую, O(n²) на прогон.
+   */
+  current: {
+    readonly base: SnapshotRecord | null;
+    state: State;
+    folded: number;
+    uptoSeq: number;
+  } | null;
 }
 
 interface PendingFault {
@@ -209,6 +222,7 @@ class MemoryBoardStoreImpl implements MemoryBoardStore {
       actorClocks: new Map(),
       boardMaxLamport: 0,
       snapshot: null,
+      current: null,
     };
     entry.members.set(input.ownerId, { role: "owner", displayName: input.ownerName });
     this.boards.set(input.id, entry);
@@ -314,15 +328,24 @@ class MemoryBoardStoreImpl implements MemoryBoardStore {
   }
 
   private computeCurrentState(entry: BoardEntry): ReplayResult {
-    const baseline = entry.snapshot?.uptoSeq ?? 0;
-    const tail = entry.rows.slice(firstIndexAfter(entry.rows, baseline));
-    let state: State = entry.snapshot?.state ?? empty();
-    let uptoSeq = baseline;
-    for (const row of tail) {
-      state = merge(state, fromWire(row.delta));
-      uptoSeq = row.seq;
+    let cache = entry.current;
+    if (cache === null || cache.base !== entry.snapshot) {
+      const baseline = entry.snapshot?.uptoSeq ?? 0;
+      cache = {
+        base: entry.snapshot,
+        state: entry.snapshot?.state ?? empty(),
+        folded: firstIndexAfter(entry.rows, baseline),
+        uptoSeq: baseline,
+      };
+      entry.current = cache;
     }
-    return { state, uptoSeq };
+    for (; cache.folded < entry.rows.length; cache.folded++) {
+      // biome-ignore lint/style/noNonNullAssertion: folded < rows.length
+      const row = entry.rows[cache.folded]!;
+      cache.state = merge(cache.state, fromWire(row.delta));
+      cache.uptoSeq = row.seq;
+    }
+    return { state: cache.state, uptoSeq: cache.uptoSeq };
   }
 
   async authors(boardId: string): Promise<ReadonlyMap<EntityId, string>> {
