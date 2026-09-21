@@ -74,6 +74,14 @@ export interface ProfileConfig {
    * случается в единицах прогонов из десяти, и регрессия досылки проходит матрицу.
    */
   readonly revealNeedsOffline: boolean;
+  /**
+   * Доля `--ops`, которую прогон проводит в фазе, прежде чем владелец перейдёт дальше (§ 5.3:
+   * «долгий `collect`» у `reveal`, «фаза `vote` большую часть прогона» у `votes`). Без темпа
+   * все фазы проскакивали за первые сотни действий и остаток прогона жил в `actions`:
+   * скрытая фаза, досылка после reveal и голосование проверялись лишь в короткий начальный отрезок.
+   * Для последней фазы (`actions`) значение не используется.
+   */
+  readonly phaseShare: Readonly<Record<Phase, number>>;
   /** Из какого диапазона генератор берёт `voteLimit` при создании доски (§ 3). */
   readonly voteLimitRange: readonly [number, number];
 }
@@ -118,9 +126,10 @@ export const TRACE_VERSION = 3;
  * поэтому трассы других версий планировщика проигрываются.
  * 2 — цель выбирается выборкой из состояния клиента, порядок таблиц по хешу, вес E6/E8
  * и шаг контрольных точек зависят от числа действий (`LONG_RUN_ACTS`);
- * 3 — подпотоки `selection`/`world`/`ids`, идентификаторы в решениях.
+ * 3 — подпотоки `selection`/`world`/`ids`, идентификаторы в решениях;
+ * 4 — темп смены фаз (`phaseShare`) и ранняя контрольная точка после первого reveal.
  */
-export const SCHEDULER_VERSION = 3;
+export const SCHEDULER_VERSION = 4;
 
 const BASE_EVENTS: EventWeights = {
   act: 30,
@@ -159,6 +168,19 @@ const BASE_INTENTS: IntentWeightsByPhase = {
   actions: { createAction: 30, editAction: 20, assign: 20, setDone: 20, delete: 10 },
 };
 
+/**
+ * Первые четыре фазы по 0,15 прогона, остальное — `actions` с запасом: команда «дальше» доходит до
+ * сервера не сразу (очередь владельца, разрывы), и каждая смена запаздывает; при 0,2 на фазу до
+ * `discuss` и `actions` (createAction/assign/setDone) прогон почти не добирался.
+ */
+const EVEN_PHASES: Readonly<Record<Phase, number>> = {
+  collect: 0.15,
+  group: 0.15,
+  vote: 0.15,
+  discuss: 0.15,
+  actions: 0.4,
+};
+
 function profile(overrides: Partial<ProfileConfig> & { readonly name: Profile }): ProfileConfig {
   return {
     hot: 0.3,
@@ -167,6 +189,7 @@ function profile(overrides: Partial<ProfileConfig> & { readonly name: Profile })
     intentWeights: BASE_INTENTS,
     resetVotesShare: 0.1,
     revealNeedsOffline: false,
+    phaseShare: EVEN_PHASES,
     voteLimitRange: [1, 3],
     ...overrides,
   };
@@ -187,10 +210,12 @@ const PROFILE_CONFIGS: Readonly<Record<Profile, ProfileConfig>> = {
     name: "reveal",
     events: { ...BASE_EVENTS, cut: 8, serverNotice: 6, reload: 0.5, snapshot: 0 },
     revealNeedsOffline: true,
+    phaseShare: { collect: 0.3, group: 0.175, vote: 0.175, discuss: 0.175, actions: 0.175 },
   }),
   votes: profile({
     name: "votes",
     resetVotesShare: 0.4,
+    phaseShare: { collect: 0.1, group: 0.1, vote: 0.6, discuss: 0.1, actions: 0.1 },
     voteLimitRange: [1, 2],
     intentWeights: { ...BASE_INTENTS, vote: { vote: 70, unvote: 30 } },
   }),
