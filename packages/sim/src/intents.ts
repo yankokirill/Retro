@@ -351,6 +351,16 @@ export function generateIntent(world: World, clientIndex: number, prng: Prng): I
   return null;
 }
 
+/** С какого числа действий длится нынешняя фаза; обновляется прогоном после каждого шага. */
+const phaseClock = new WeakMap<World, { phase: Phase; since: number }>();
+
+/** Запоминает момент смены фазы (по данным хранилища) — для темпа `phaseShare` в `generateCommand`. */
+export function notePhase(world: World): void {
+  const phase = world.store.boardSync(world.boardId)?.phase ?? "collect";
+  const clock = phaseClock.get(world);
+  if (!clock || clock.phase !== phase) phaseClock.set(world, { phase, since: world.acts });
+}
+
 /**
  * Команда владельца/фасилитатора (E7) — `setPhase`/`resetVotes` (§ 5.6
  * проекта). `grantFacilitator`/таймер — вне области симулятора (§ 14
@@ -365,12 +375,6 @@ export function generateCommand(world: World, clientIndex: number, prng: Prng): 
   const phase = world.store.boardSync(world.boardId)?.phase ?? "collect";
   const profile = world.config.profile;
 
-  // reveal только при клиенте без соединения (профиль reveal, H1): иначе — не сейчас.
-  if (phase === "collect" && profile.revealNeedsOffline) {
-    const someoneOffline = world.clients.some((c, i) => i !== clientIndex && c.connection === null);
-    if (!someoneOffline) return null;
-  }
-
   if (phase === "vote" && prng.next() < profile.resetVotesShare) {
     return { type: "resetVotes" };
   }
@@ -378,6 +382,17 @@ export function generateCommand(world: World, clientIndex: number, prng: Prng): 
   // Изредка — запрещённая попытка вернуться в collect (S7: irreversible_phase).
   if (phase !== "collect" && prng.next() < 0.05) {
     return { type: "setPhase", phase: "collect" };
+  }
+
+  // Темп смены фаз: перейти дальше можно, лишь проведя в фазе свою долю прогона (`phaseShare`).
+  const clock = phaseClock.get(world);
+  const sincePhase = clock && clock.phase === phase ? world.acts - clock.since : world.acts;
+  if (sincePhase < profile.phaseShare[phase] * world.config.ops) return null;
+
+  // reveal только при клиенте без соединения (профиль reveal, H1): иначе — не сейчас.
+  if (phase === "collect" && profile.revealNeedsOffline) {
+    const someoneOffline = world.clients.some((c, i) => i !== clientIndex && c.connection === null);
+    if (!someoneOffline) return null;
   }
 
   const order: Phase[] = ["collect", "group", "vote", "discuss", "actions"];

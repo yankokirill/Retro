@@ -29,6 +29,7 @@ import { recordConflictAtCheckpoint } from "./coverage.js";
 import { drain } from "./drain.js";
 import { type Candidate, type Event, enabledEvents, resolveCandidate } from "./events.js";
 import type { WorldHooks } from "./hooks.js";
+import { notePhase } from "./intents.js";
 import { foldNewRows } from "./oracle.js";
 import { createStreams, type Prng, type Streams } from "./prng.js";
 import type { Stats } from "./stats.js";
@@ -229,6 +230,7 @@ export async function runSimulation(
   const wellFormedState = createWellFormedState();
   const decisions: Event[] = [];
   let nextCheckpoint = prng.int(config.checkpointMin, config.checkpointMax);
+  let revealSeen = false;
 
   while (world.acts < config.ops) {
     const candidates = enabledEvents(world, "run");
@@ -239,6 +241,13 @@ export async function runSimulation(
     world.stats.steps += 1;
     const violation = await step(world, event, wellFormedState);
     if (violation) return fail(violation, decisions, world.stats);
+    notePhase(world);
+    if (!revealSeen && world.store.boardSync(world.boardId)?.phase !== "collect") {
+      // Первый уход из collect (reveal): проверка вскоре после него, пока подключённые клиенты не
+      // успели переподключиться и «починить» пропущенное досылкой через welcome (мутант M6).
+      revealSeen = true;
+      nextCheckpoint = Math.min(nextCheckpoint, world.acts + prng.int(20, 60));
+    }
 
     if (world.acts >= nextCheckpoint) {
       const violation2 = await checkpoint(world, streams, decisions, wellFormedState);
