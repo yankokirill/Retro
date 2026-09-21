@@ -1,0 +1,33 @@
+{
+  "version": 3,
+  "schedulerVersion": 3,
+  "seed": 1,
+  "config": {
+    "clients": 5,
+    "ops": 1000,
+    "profile": "default",
+    "checkpointMin": 20,
+    "checkpointMax": 60
+  },
+  "decisions": [
+    { "kind": "checkpoint" },
+    {
+      "kind": "act",
+      "client": 4,
+      "intent": {
+        "type": "createSticker",
+        "column": "start",
+        "frac": "a",
+        "text": "alpha",
+        "color": "pink"
+      }
+    },
+    {
+      "kind": "command",
+      "client": 0,
+      "command": { "type": "setPhase", "phase": "vote" },
+      "commandId": "0e9de643-2325-4867-ad92-630d672a0556"
+    },
+    { "kind": "checkpoint" }
+  ]
+}
