@@ -15,14 +15,17 @@ import type { Streams } from "./prng.js";
 import { type Violation, violation } from "./violation.js";
 import type { World } from "./world.js";
 
-/** `B = 10 · (сообщений в каналах + Σ|P(u)| + число клиентов) + 100` (§ 7 спецификации). */
+/** `B = 10 · (c + 1) · (сообщений в каналах + Σ|P(u)| + c) + 100`, `c` — число клиентов (§ 7 спецификации, SIM-07). */
 function drainBudget(world: World): number {
   const inChannels = world.connections.reduce(
     (sum, c) => sum + c.toServer.length + c.toClient.length,
     0,
   );
   const pendingTotal = world.clients.reduce((sum, c) => sum + c.core.inspect().pending.length, 0);
-  return 10 * (inChannels + pendingTotal + world.clients.length) + 100;
+  const clients = world.clients.length;
+  // Каждая операция порождает пересылку, ack и рассылку остальным (~c + 1 сообщений): без множителя
+  // c + 1 досылка, которая сходится, но не укладывается в B, давала ложный S9 (замер 2026-09-21).
+  return 10 * (clients + 1) * (inChannels + pendingTotal + clients) + 100;
 }
 
 export async function drain(
