@@ -7,7 +7,7 @@
 
 import { spawn } from "node:child_process";
 import { rmSync } from "node:fs";
-import { availableParallelism } from "node:os";
+import { availableParallelism, freemem } from "node:os";
 import { parseArgs } from "node:util";
 
 const PROFILES = ["default", "conflicts", "chaos", "reveal", "votes", "faults"];
@@ -17,13 +17,26 @@ const { values } = parseArgs({
     seeds: { type: "string", default: "20" },
     ops: { type: "string", default: "10000" },
     clients: { type: "string", default: "5,20" },
-    concurrency: { type: "string", default: String(availableParallelism()) },
+    concurrency: { type: "string" },
   },
 });
 
 const seeds = Number(values.seeds);
-const concurrency = Math.max(1, Number(values.concurrency));
 const clientCounts = values.clients.split(",").map(Number);
+
+// Прогон держит в памяти всё состояние доски у каждого клиента: замер 2026-09-21 — около 2,2 ГБ на
+// 20 клиентов при 10⁴ оп и до ~0,8 ГБ на 5. Параллелизм «по числу ядер» на 16 ГБ упирался в память
+// (система убивала процессы), поэтому по умолчанию считаем от свободной памяти и худшего случая набора.
+const GIGABYTE = 1024 ** 3;
+const worstClients = Math.max(...clientCounts);
+const perRun = (worstClients >= 20 ? 2.6 : worstClients >= 10 ? 1.4 : 0.9) * GIGABYTE;
+const byMemory = Math.max(1, Math.floor((freemem() * 0.8) / perRun));
+const concurrency = Math.max(
+  1,
+  values.concurrency === undefined
+    ? Math.min(availableParallelism(), byMemory)
+    : Number(values.concurrency),
+);
 
 const jobs = [];
 for (const profile of PROFILES) {
