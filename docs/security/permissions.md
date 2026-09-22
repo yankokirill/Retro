@@ -2,7 +2,7 @@
 
 - **Статус:** первая версия, T-011 (V6, `docs/spec/consistency-model.md` § 7)
 - **Источник:** `CLAUDE.md` § 5 (черновик) — этот файл его уточняет по фазам и заменяет как источник истины для `tools/check-perms` (появится позже, не в T-011)
-- **Реализация:** `apps/server/src/ops/permissions.ts` (`classifyAction`, `checkPermission`) — для операций над стикерами/action item; `apps/server/src/boards/service.ts` `setPhase` — для смены фазы (не CRDT-операция, поэтому отдельно)
+- **Реализация:** `packages/server-core/src/rules/permissions.ts` (`classifyAction`, `checkPermission`) — для операций над стикерами/action item; `packages/server-core/src/rules/board.ts` `checkSetPhase` — для смены фазы (не CRDT-операция, поэтому отдельно). Оба перенесены из `apps/server` при T-024 (было `apps/server/src/ops/permissions.ts` и `apps/server/src/boards/service.ts`; тех файлов больше нет, найдено независимой проверкой 2026-09-22)
 
 ## Роли
 
