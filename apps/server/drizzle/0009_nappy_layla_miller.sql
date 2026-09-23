@@ -1,0 +1,1 @@
+ALTER TABLE "boards" ADD COLUMN "timer_ends_at" timestamp with time zone;

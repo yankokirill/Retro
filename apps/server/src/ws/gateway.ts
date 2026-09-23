@@ -32,6 +32,7 @@ export function registerBoardWebSocket(app: FastifyInstance, deps: WsGatewayDeps
   const store = new PgBoardStore(deps.db);
   const server = createBoardServer({
     store,
+    now: () => Date.now(),
     voterToken: (boardId, guestId) => computeVoterToken(deps.voterTokenSecret, boardId, guestId),
     // Тот же предохранитель, что раньше был в этом файле (T-009): «не
     // реализовано/сломано», не диагноз конкретного правила V1–V7 (те уже

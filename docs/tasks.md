@@ -299,7 +299,7 @@
 ### T-030: Серверные команды `grantFacilitator` и таймер обсуждения
 
 - **REQ:** REQ-003 (кр. 2–3), REQ-019 (кр. 2), REQ-027 (таймер переживает перезапуск)
-- **Статус:** in-progress
+- **Статус:** review — PR #33
 - **Размер:** M
 - **Зависит от:** T-024, T-025
 - **Затрагивает:** packages/server-core (команды, порт `BoardStore`: `setTimer`, `setMemberRole`; необязательный порт часов `now`), packages/protocol (`meta.role?`), packages/client-core (`meta.role` обновляет роль), apps/server (`PgBoardStore`, миграция `boards.timer_ends_at`, `now` в шлюзе)

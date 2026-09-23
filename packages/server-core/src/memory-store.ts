@@ -105,6 +105,7 @@ interface BoardEntry {
     phase: Phase;
     voteLimit: number;
     revealSeq: number | null;
+    timerEndsAt: string | null;
   };
   readonly members: Map<string, MemberRecord>;
   /** entityId -> guestId; первый писатель побеждает (как `onConflictDoNothing` в Postgres). */
@@ -223,6 +224,7 @@ class MemoryBoardStoreImpl implements MemoryBoardStore {
         phase: "collect",
         voteLimit: input.voteLimit,
         revealSeq: null,
+        timerEndsAt: null,
       },
       members: new Map(),
       authors: new Map(),
@@ -395,6 +397,16 @@ class MemoryBoardStoreImpl implements MemoryBoardStore {
   async updatePhase(boardId: string, phase: Phase, revealSeq: number | null): Promise<void> {
     const entry = this.requireEntry(boardId);
     entry.record = { ...entry.record, phase, revealSeq };
+  }
+
+  async setTimer(boardId: string, endsAt: string | null): Promise<void> {
+    const entry = this.requireEntry(boardId);
+    entry.record = { ...entry.record, timerEndsAt: endsAt };
+  }
+
+  async setMemberRole(boardId: string, guestId: string, role: Role): Promise<void> {
+    const member = this.requireEntry(boardId).members.get(guestId);
+    if (member) this.requireEntry(boardId).members.set(guestId, { ...member, role });
   }
 
   async transaction<T>(fn: (tx: BoardStoreTx) => Promise<T>): Promise<T> {

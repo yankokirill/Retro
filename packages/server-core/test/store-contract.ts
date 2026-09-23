@@ -197,6 +197,67 @@ export function describeBoardStoreContract(
       expect(record?.revealSeq).toBe(7);
     });
 
+    // T-030 (docs/design/T-030-meta-commands.md): `BoardRecord.timerEndsAt`,
+    // `setTimer`, `setMemberRole`.
+    it("REQ-019: board().timerEndsAt по умолчанию null", async () => {
+      const store = await freshStore();
+      await setup.createBoard(store, BOARD);
+      const record = await store.board(BOARD.id);
+      expect(record?.timerEndsAt).toBeNull();
+    });
+
+    it("REQ-027: setTimer сохраняет момент окончания — читается через board(), не трогает фазу", async () => {
+      const store = await freshStore();
+      await setup.createBoard(store, BOARD);
+      const endsAt = "2026-09-23T12:34:56.000Z";
+
+      await store.setTimer(BOARD.id, endsAt);
+      const record = await store.board(BOARD.id);
+      expect(record?.timerEndsAt).toBe(endsAt);
+      expect(record?.phase).toBe(BOARD.phase);
+      expect(record?.revealSeq).toBeNull();
+    });
+
+    it("REQ-019: setTimer заменяет прежнее значение, setTimer(null) сбрасывает таймер", async () => {
+      const store = await freshStore();
+      await setup.createBoard(store, BOARD);
+
+      await store.setTimer(BOARD.id, "2026-09-23T12:00:00.000Z");
+      await store.setTimer(BOARD.id, "2026-09-23T13:00:00.000Z");
+      expect((await store.board(BOARD.id))?.timerEndsAt).toBe("2026-09-23T13:00:00.000Z");
+
+      await store.setTimer(BOARD.id, null);
+      expect((await store.board(BOARD.id))?.timerEndsAt).toBeNull();
+    });
+
+    it("REQ-027: updatePhase не сбрасывает и не меняет timerEndsAt (это делает слой правил)", async () => {
+      const store = await freshStore();
+      await setup.createBoard(store, BOARD);
+      await store.setTimer(BOARD.id, "2026-09-23T12:00:00.000Z");
+      await store.updatePhase(BOARD.id, "discuss", 3);
+      expect((await store.board(BOARD.id))?.timerEndsAt).toBe("2026-09-23T12:00:00.000Z");
+    });
+
+    it("REQ-003: setMemberRole меняет роль существующего участника — видно через memberRole", async () => {
+      const store = await freshStore();
+      await setup.createBoard(store, BOARD);
+      await setup.addMember(store, BOARD.id, GUEST_1, "participant");
+      await setup.addMember(store, BOARD.id, GUEST_2, "participant");
+
+      await store.setMemberRole(BOARD.id, GUEST_1, "facilitator");
+      expect(await store.memberRole(BOARD.id, GUEST_1)).toBe("facilitator");
+      // Другие участники не затронуты.
+      expect(await store.memberRole(BOARD.id, GUEST_2)).toBe("participant");
+    });
+
+    it("REQ-003: setMemberRole для несуществующего участника — без эффекта, участник не создаётся", async () => {
+      const store = await freshStore();
+      await setup.createBoard(store, BOARD);
+
+      await store.setMemberRole(BOARD.id, UNKNOWN_GUEST_ID, "facilitator");
+      expect(await store.memberRole(BOARD.id, UNKNOWN_GUEST_ID)).toBeNull();
+    });
+
     it("SIM-03: memberRole — null для неизвестного участника, иначе его роль", async () => {
       const store = await freshStore();
       await setup.createBoard(store, BOARD);

@@ -6,7 +6,7 @@
 
 import type { WireDelta } from "@retro/crdt";
 import { activeVotes, toWire, unvote } from "@retro/crdt";
-import type { ClientMessage, Phase } from "@retro/protocol";
+import type { ClientMessage, Phase, RejectReason } from "@retro/protocol";
 import type { ConnectionId } from "../board-server.js";
 import { checkResetVotes, checkSetPhase, resolveRole } from "../rules/board.js";
 import { isEmptyDelta, projectHidden } from "../rules/visibility.js";
@@ -46,6 +46,10 @@ async function setPhase(
   const isReveal = board.phase === "collect" && params.phase !== "collect";
   const revealSeq = isReveal ? await store.lastSeq(params.boardId) : board.revealSeq;
   await store.updatePhase(params.boardId, params.phase, revealSeq);
+  // T-030: таймер осмыслен только в discuss (protocol.md § 6) — уходя в другую фазу, сбрасываем.
+  if (params.phase !== "discuss" && board.timerEndsAt !== null) {
+    await store.setTimer(params.boardId, null);
+  }
   return "ok";
 }
 
@@ -169,5 +173,115 @@ export async function handleCommand(
     return;
   }
 
-  // Остальные команды (grantFacilitator/timer) — вне T-012, здесь не реализованы.
+  if (message.command.type === "grantFacilitator") {
+    await handleGrantFacilitator(
+      ctx,
+      connection,
+      boardId,
+      sub,
+      message.id,
+      message.command.guestId,
+    );
+    return;
+  }
+
+  if (message.command.type === "startTimer" || message.command.type === "stopTimer") {
+    await handleTimer(ctx, connection, boardId, sub, message.id, message.command);
+  }
+}
+
+function reply(
+  ctx: HandlerContext,
+  connection: ConnectionId,
+  id: string,
+  result: { ok: true } | { ok: false; reason: RejectReason },
+): void {
+  ctx.sink.send(
+    connection,
+    result.ok
+      ? { type: "commandResult", id, ok: true }
+      : { type: "commandResult", id, ok: false, reason: result.reason, message: result.reason },
+  );
+}
+
+async function roleOf(ctx: HandlerContext, boardId: string, guestId: string) {
+  const board = await ctx.store.board(boardId);
+  if (!board) throw new Error(`command: board unexpectedly not found (boardId=${boardId})`);
+  const memberRole = await ctx.store.memberRole(boardId, guestId);
+  return { board, role: resolveRole({ ownerId: board.ownerId, guestId, memberRole }) };
+}
+
+/** `meta` всем подписчикам доски (одинаков для всех: проекция авторов зависит только от фазы). */
+async function broadcastMeta(ctx: HandlerContext, boardId: string, guestId: string): Promise<void> {
+  const guest = await getBoardForGuest(ctx.store, boardId, guestId);
+  if (!guest) return;
+  const meta = buildMeta(boardId, guest);
+  for (const subscriber of ctx.registry.subscribersOf(boardId)) {
+    ctx.sink.send(subscriber.connection, { type: "meta", meta });
+  }
+}
+
+/** REQ-003 (кр. 2–3), protocol.md § 6. */
+async function handleGrantFacilitator(
+  ctx: HandlerContext,
+  connection: ConnectionId,
+  boardId: string,
+  sub: Subscriber,
+  id: string,
+  targetGuestId: string,
+): Promise<void> {
+  const { board, role } = await roleOf(ctx, boardId, sub.guestId);
+  if (role !== "owner") return reply(ctx, connection, id, { ok: false, reason: "forbidden" });
+
+  const targetRole = await ctx.store.memberRole(boardId, targetGuestId);
+  if (targetRole === null && targetGuestId !== board.ownerId) {
+    return reply(ctx, connection, id, { ok: false, reason: "unknown_target" });
+  }
+
+  if (targetRole !== null && targetRole !== "facilitator" && targetRole !== "owner") {
+    await ctx.store.setMemberRole(boardId, targetGuestId, "facilitator");
+    const guest = await getBoardForGuest(ctx.store, boardId, targetGuestId);
+    if (guest) {
+      const meta = buildMeta(boardId, guest);
+      for (const subscriber of ctx.registry.subscribersOf(boardId)) {
+        if (subscriber.guestId === targetGuestId) {
+          ctx.sink.send(subscriber.connection, { type: "meta", meta, role: "facilitator" });
+        }
+      }
+    }
+  }
+  reply(ctx, connection, id, { ok: true });
+}
+
+/** REQ-019 (кр. 2), protocol.md § 6. */
+async function handleTimer(
+  ctx: HandlerContext,
+  connection: ConnectionId,
+  boardId: string,
+  sub: Subscriber,
+  id: string,
+  command: Extract<CommandMessage["command"], { type: "startTimer" | "stopTimer" }>,
+): Promise<void> {
+  const { board, role } = await roleOf(ctx, boardId, sub.guestId);
+  if (role !== "owner" && role !== "facilitator") {
+    return reply(ctx, connection, id, { ok: false, reason: "forbidden" });
+  }
+
+  if (command.type === "stopTimer") {
+    if (board.timerEndsAt !== null) {
+      await ctx.store.setTimer(boardId, null);
+      await broadcastMeta(ctx, boardId, sub.guestId);
+    }
+    return reply(ctx, connection, id, { ok: true });
+  }
+
+  if (ctx.now === undefined)
+    return reply(ctx, connection, id, { ok: false, reason: "invalid_shape" });
+  if (board.phase !== "discuss")
+    return reply(ctx, connection, id, { ok: false, reason: "wrong_phase" });
+
+  const endsAt = new Date(ctx.now() + command.seconds * 1000).toISOString();
+  await ctx.store.setTimer(boardId, endsAt);
+  await broadcastMeta(ctx, boardId, sub.guestId);
+  reply(ctx, connection, id, { ok: true });
 }

@@ -42,6 +42,7 @@ interface BoardRow {
   phase: Phase;
   voteLimit: number;
   revealSeq: number | null;
+  timerEndsAt: string | null;
 }
 
 interface MemberRow {
@@ -67,7 +68,19 @@ class ReferenceBoardStore implements BoardStore {
       phase: row.phase,
       voteLimit: row.voteLimit,
       revealSeq: row.revealSeq,
+      timerEndsAt: row.timerEndsAt,
     };
+  }
+
+  async setTimer(boardId: string, endsAt: string | null): Promise<void> {
+    const row = this.boards.get(boardId);
+    if (!row) throw new Error(`ReferenceBoardStore.setTimer: unknown board ${boardId}`);
+    row.timerEndsAt = endsAt;
+  }
+
+  async setMemberRole(boardId: string, guestId: string, role: Role): Promise<void> {
+    const member = this.members.get(boardId)?.get(guestId);
+    if (member) member.role = role;
   }
 
   async memberRole(boardId: string, guestId: string): Promise<Role | null> {
@@ -240,6 +253,7 @@ class ReferenceBoardStore implements BoardStore {
       phase: board.phase,
       voteLimit: board.voteLimit,
       revealSeq: null,
+      timerEndsAt: null,
     });
   }
 
