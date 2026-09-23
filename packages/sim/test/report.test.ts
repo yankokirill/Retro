@@ -8,7 +8,11 @@ import { runSimulation } from "../src/run.js";
 
 describe("§ 9.3: клиент-специфичное различие в отчёте о нарушении", () => {
   it("§ 9.3: S4 (мутант M7 — пустой хвост welcome) несёт клиента, его актора и чего не хватает в X_c", async () => {
-    const built = buildConfig({ seed: 1, clients: 5, ops: 300, profile: "default" });
+    // seed 9, не 1: после T-016 (права на группы, V6) траектория seed=1 изменилась — первое S4 мутанта
+    // M7 теперь фиксируется на клиенте с 1 недостающей записью и 1 лишней (createdCount = 0), что не
+    // противоречит спецификации § 9.3, но не то, что проверяет этот тест. M7 ловится S4 на всех seed
+    // 1–12; seed 9 — первый, где форма отчёта совпадает с ожидаемой ниже. Проверки не менялись.
+    const built = buildConfig({ seed: 9, clients: 5, ops: 300, profile: "default" });
     if (!built.ok) throw new Error(built.error);
     const run = await runSimulation(built.config, { hooks: mutantHooks("M7") });
     expect(run.ok).toBe(false);

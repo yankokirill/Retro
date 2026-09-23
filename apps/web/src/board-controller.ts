@@ -56,6 +56,9 @@ export interface BoardController {
   moveTo(id: EntityId, column: Column, index: number): ActResult;
   remove(id: EntityId): ActResult;
   restore(id: EntityId): ActResult;
+  createGroup(column: Column, title: string): ActResult;
+  renameGroup(id: EntityId, title: string): ActResult;
+  setGroup(cardId: EntityId, groupId: EntityId | null): ActResult;
   vote(target: EntityId): ActResult;
   unvote(target: EntityId): ActResult;
   /** Команды метаданных (T-018): `false` — команда не ушла (клиент не `welcomed`). */
@@ -186,6 +189,20 @@ export function createBoardController(deps: {
       const frac = fracBetween(fracOf(others[at - 1]), fracOf(others[at]));
       return run(client.act({ type: "move", id, place: { column, frac } }));
     },
+    createGroup(column, rawTitle) {
+      const title = rawTitle.trim();
+      if (title === "") return { ok: false, reason: "invalid_intent" };
+      const items = client.inspect().view.columns.get(column) ?? [];
+      const frac = fracBetween(fracOf(items[items.length - 1]), null);
+      return run(client.act({ type: "createGroup", column, frac, title }));
+    },
+    renameGroup(id, rawTitle) {
+      const title = rawTitle.trim();
+      if (title === "") return { ok: false, reason: "invalid_intent" };
+      return run(client.act({ type: "renameGroup", id, title }));
+    },
+    setGroup: (cardId, groupId) =>
+      run(client.act({ type: "setGroup", id: cardId, group: groupId })),
     vote: (target) => run(client.act({ type: "vote", target })),
     unvote(target) {
       const snapshot = client.inspect();

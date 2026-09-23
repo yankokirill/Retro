@@ -4,8 +4,8 @@
 // `rules/board.ts` `checkSetPhase` (это не CRDT-операция).
 //
 // Сознательно НЕ гейтится в T-011 (см. REQ, которые задача заявляет —
-// docs/tasks.md): создание/переименование группы (REQ-012), поля action
-// item assignee/done/удаление (REQ-018/019), vote/unvote (V7, T-012). Эти
+// docs/tasks.md): поля action item assignee/done/удаление (REQ-018/019),
+// vote/unvote (V7, T-012). Группы (REQ-012/013) гейтятся с T-016. Эти
 // операции проходят `classifyAction` → `null` → пропускаются без проверки
 // прав — не потому что всем можно, а потому что правило ещё не назначено
 // ни одной задаче.
@@ -22,7 +22,9 @@ export type StickerAction =
   | "createAction"
   | "editSticker"
   | "assignGroup"
-  | "moveSticker";
+  | "moveSticker"
+  | "createGroup"
+  | "editGroup";
 
 /**
  * Какое действие представляет клиентская дельта, если T-011 вообще его
@@ -43,13 +45,15 @@ export function classifyAction(state: State, delta: WireDelta): StickerAction | 
   if (created) {
     if (created.kind === "sticker") return "createSticker";
     if (created.kind === "action") return "createAction";
-    return null; // group
+    return "createGroup";
   }
   if (delta.votes.length > 0 || delta.unvotes.length > 0) return null;
 
   const [entry] = delta.entries;
   if (!entry) return null;
-  if (entityKind(state, entry.key.entity) !== "sticker") return null;
+  const kind = entityKind(state, entry.key.entity);
+  if (kind === "group") return "editGroup";
+  if (kind !== "sticker") return null;
   if (entry.key.field === "group") return "assignGroup";
   if (entry.key.field === "place") return "moveSticker";
   return "editSticker";
@@ -125,6 +129,12 @@ export function checkPermission(params: CheckPermissionParams): CheckPermissionR
       if (phase === "collect" && !isOwn) {
         return reject("forbidden", "participant can only move their own sticker in collect phase");
       }
+      return { ok: true };
+    case "createGroup":
+    case "editGroup":
+      // REQ-012/013: группа общая, автора нет — владение не проверяется.
+      if (phase !== "group")
+        return reject("wrong_phase", `${action} not allowed in phase ${phase}`);
       return { ok: true };
     case "assignGroup":
       if (phase !== "group") {
