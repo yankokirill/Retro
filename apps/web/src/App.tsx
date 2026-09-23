@@ -43,10 +43,12 @@ function Home({
   api,
   initialName,
   navigate,
+  onName,
 }: {
   api: Api;
   initialName: string | null;
   navigate: (p: string) => void;
+  onName: (name: string) => void;
 }) {
   const [title, setTitle] = useState("");
   const [name, setName] = useState(initialName ?? "");
@@ -79,6 +81,8 @@ function Home({
             setError(null);
             const result = await api.createBoard({ title: title.trim(), displayName: name.trim() });
             saveDisplayName(localStorage, name.trim());
+            // Без этого App считает имя неизвестным и на экране доски спросит его снова.
+            onName(name.trim());
             setCreated(result);
           } catch (err) {
             setError(err instanceof ApiError ? err.message : "Не удалось создать доску");
@@ -172,7 +176,9 @@ export function App() {
 
   switch (route.name) {
     case "home":
-      return <Home api={api} initialName={displayName} navigate={navigate} />;
+      return (
+        <Home api={api} initialName={displayName} navigate={navigate} onName={setDisplayName} />
+      );
     case "join":
       return displayName === null ? (
         askName

@@ -307,6 +307,7 @@ export function BoardView({
       {isOwner && members !== null && (
         <FacilitatorPanel
           members={members}
+          onRefresh={reloadMembers}
           onGrant={(guestId) => {
             controller.grantFacilitator(guestId);
             // Ответ сервера owner'у не несёт новой роли цели — перечитываем список чуть позже.
