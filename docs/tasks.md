@@ -330,7 +330,7 @@
 ### T-022: e2e конкурентности в браузерах
 
 - **REQ:** REQ-007, REQ-008, REQ-023
-- **Статус:** todo
+- **Статус:** review — ветка `feat/T-022-e2e-concurrency`; запуск: `npm run test:e2e` (Postgres в Docker, Chromium через `npx playwright install chromium`); в `npm run check` не входит
 - **Размер:** M
 - **Зависит от:** T-015
 - **Затрагивает:** e2e/

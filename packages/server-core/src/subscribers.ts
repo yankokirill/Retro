@@ -15,8 +15,9 @@ export interface Subscriber {
   readonly guestId: string;
   /**
    * Роль на момент `hello`, кэшируется на время соединения (T-011,
-   * перенесено без изменений из `ws/board-hub.ts`). Может устареть, если
-   * роль сменится посреди сессии (`grantFacilitator`) — вне T-011/T-024.
+   * перенесено без изменений из `ws/board-hub.ts`). Если роль меняется
+   * посреди сессии (`grantFacilitator`, T-030), реестр подменяет подписчика
+   * через `SubscriberRegistry.updateRole` — обработчики читают `registry.get`.
    */
   readonly role: Role;
 }
@@ -48,6 +49,19 @@ export class SubscriberRegistry {
     if (!set) return;
     set.delete(subscriber);
     if (set.size === 0) this.byBoard.delete(boardId);
+  }
+
+  /** Новая роль всем открытым соединениям гостя на этой доске (T-030, `grantFacilitator`). */
+  updateRole(boardId: string, guestId: string, role: Role): void {
+    const set = this.byBoard.get(boardId);
+    if (!set) return;
+    for (const subscriber of [...set]) {
+      if (subscriber.guestId !== guestId) continue;
+      const next: Subscriber = { ...subscriber, role };
+      set.delete(subscriber);
+      set.add(next);
+      this.byConnection.set(next.connection, next);
+    }
   }
 
   /** `undefined` — соединение ещё не прошло `hello` (или уже отписано). */

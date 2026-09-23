@@ -13,3 +13,5 @@ coverage/
 .claude/scheduled_tasks.lock
 packages/sim/.coverage/
 .sim/
+e2e/test-results/
+e2e/playwright-report/

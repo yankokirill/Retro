@@ -240,6 +240,7 @@ async function handleGrantFacilitator(
 
   if (targetRole !== null && targetRole !== "facilitator" && targetRole !== "owner") {
     await ctx.store.setMemberRole(boardId, targetGuestId, "facilitator");
+    ctx.registry.updateRole(boardId, targetGuestId, "facilitator");
     const guest = await getBoardForGuest(ctx.store, boardId, targetGuestId);
     if (guest) {
       const meta = buildMeta(boardId, guest);

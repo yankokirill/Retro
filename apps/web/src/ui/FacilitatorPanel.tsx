@@ -12,12 +12,19 @@ const ROLE_NAMES: Record<Role, string> = {
 export interface FacilitatorPanelProps {
   readonly members: readonly { guestId: string; displayName: string; role: Role }[];
   readonly onGrant: (guestId: string) => void;
+  /** Перечитать список: новые участники сами в нём не появляются (сервер список не рассылает). */
+  readonly onRefresh?: () => void;
 }
 
-export function FacilitatorPanel({ members, onGrant }: FacilitatorPanelProps) {
+export function FacilitatorPanel({ members, onGrant, onRefresh }: FacilitatorPanelProps) {
   return (
     <section aria-label="Участники" className="members">
       <h2>Участники</h2>
+      {onRefresh && (
+        <button type="button" onClick={onRefresh}>
+          Обновить список
+        </button>
+      )}
       <ul>
         {members.map((member) => (
           <li key={member.guestId}>
