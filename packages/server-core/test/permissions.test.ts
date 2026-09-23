@@ -29,15 +29,18 @@
 
 import type { EntityId, State } from "@retro/crdt";
 import {
+  assign,
   createAction,
   createGroup,
   createSticker,
+  deleteEntity,
   dotKey,
   empty,
   merge,
   move,
   newClock,
   setColor,
+  setDone,
   setField,
   setGroup,
   toWire,
@@ -61,6 +64,7 @@ const ALL_ACTIONS: readonly StickerAction[] = [
   "createAction",
   "editSticker",
   "assignGroup",
+  "editAction",
 ];
 
 function otherPhases(allowed: readonly Phase[]): Phase[] {
@@ -359,13 +363,61 @@ describe("classifyAction: распознаёт действие по дельт�
     expect(classifyAction(state, toWire(moved.delta))).toBe("editGroup");
   });
 
-  it("write на существующий action item классифицируется как null (action item не гейтится в T-011)", () => {
-    const actor = newActor();
-    const created = createAction(empty(), newClock(actor), { text: "do the thing" });
-    const actionId = dotKey(created.dot) as EntityId;
+  it.each(["text", "assignee", "done", "deleted"] as const)(
+    "REQ-017/REQ-018/REQ-019 (T-019): write %s на существующий action item классифицируется как editAction",
+    (field) => {
+      const actor = newActor();
+      const created = createAction(empty(), newClock(actor), { text: "do the thing" });
+      const actionId = dotKey(created.dot) as EntityId;
+      const state = created.delta as State;
+      const value = field === "done" || field === "deleted" ? true : "x";
+      const edit = setField(state, created.clock, { entity: actionId, field }, value);
+      expect(classifyAction(state, toWire(edit.delta))).toBe("editAction");
+    },
+  );
+
+  it("REQ-018 (T-019): assign/setDone/deleteEntity на action item — editAction", () => {
+    const created = createAction(empty(), newClock(newActor()), { text: "do" });
+    const id = dotKey(created.dot) as EntityId;
     const state = created.delta as State;
-    const edit = setField(state, created.clock, { entity: actionId, field: "text" }, "changed");
-    expect(classifyAction(state, toWire(edit.delta))).toBeNull();
+    for (const op of [
+      assign(state, created.clock, id, "guest-1"),
+      assign(state, created.clock, id, null),
+      setDone(state, created.clock, id, true),
+      deleteEntity(state, created.clock, id),
+    ]) {
+      expect(classifyAction(state, toWire(op.delta))).toBe("editAction");
+    }
+  });
+
+  it("REQ-017 (T-019): классификация записей в стикер и группу не меняется", () => {
+    const sticker = createSticker(empty(), newClock(newActor()), {
+      column: "start",
+      frac: "m",
+      text: "hello",
+      color: "yellow",
+    });
+    const sid = dotKey(sticker.dot) as EntityId;
+    const sstate = sticker.delta as State;
+    expect(
+      classifyAction(
+        sstate,
+        toWire(setField(sstate, sticker.clock, { entity: sid, field: "text" }, "y").delta),
+      ),
+    ).toBe("editSticker");
+    const group = createGroup(empty(), newClock(newActor()), {
+      column: "start",
+      frac: "m",
+      title: "G",
+    });
+    const gid = dotKey(group.dot) as EntityId;
+    const gstate = group.delta as State;
+    expect(
+      classifyAction(
+        gstate,
+        toWire(setField(gstate, group.clock, { entity: gid, field: "title" }, "H").delta),
+      ),
+    ).toBe("editGroup");
   });
 
   it("REQ-015 (вне области, только форма): vote(...) классифицируется как null", () => {
@@ -503,6 +555,51 @@ describe("REQ-011: participant — перемещение стикера огр�
       for (const isOwn of [true, false]) {
         expectDenied(
           checkPermission({ role: "participant", phase, action: "moveSticker", isOwn }),
+          "wrong_phase",
+        );
+      }
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-019: editAction — action item без автора, владение не проверяется
+// (docs/design/T-019-action-items.md § 1; REQ-017 кр.2, REQ-018, REQ-019 кр.1)
+// ---------------------------------------------------------------------------
+
+describe("REQ-017/REQ-018/REQ-019: editAction — таблица роль × фаза", () => {
+  it.each<Role>(["owner", "facilitator"])("%s: ok в любой фазе, любое isOwn", (role) => {
+    for (const phase of ALL_PHASES) {
+      for (const isOwn of [true, false]) {
+        expectAllowed(checkPermission({ role, phase, action: "editAction", isOwn }));
+      }
+    }
+  });
+
+  it("viewer: forbidden в любой фазе", () => {
+    for (const phase of ALL_PHASES) {
+      for (const isOwn of [true, false]) {
+        expectDenied(
+          checkPermission({ role: "viewer", phase, action: "editAction", isOwn }),
+          "forbidden",
+        );
+      }
+    }
+  });
+
+  it("participant: ok в discuss и actions независимо от isOwn", () => {
+    for (const phase of ["discuss", "actions"] as const) {
+      for (const isOwn of [true, false]) {
+        expectAllowed(checkPermission({ role: "participant", phase, action: "editAction", isOwn }));
+      }
+    }
+  });
+
+  it("participant: в остальных фазах — wrong_phase независимо от isOwn", () => {
+    for (const phase of otherPhases(["discuss", "actions"])) {
+      for (const isOwn of [true, false]) {
+        expectDenied(
+          checkPermission({ role: "participant", phase, action: "editAction", isOwn }),
           "wrong_phase",
         );
       }

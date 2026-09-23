@@ -93,6 +93,15 @@ function stickerActionFor(kind: Intent["type"]): StickerAction | null {
       return "moveSticker";
     case "setGroup":
       return "assignGroup";
+    // Группы (T-016) и action items (T-019) гейтятся так же, как стикеры; владение не проверяется.
+    case "createGroup":
+      return "createGroup";
+    case "renameGroup":
+      return "editGroup";
+    case "editAction":
+    case "assign":
+    case "setDone":
+      return "editAction";
     default:
       return null;
   }
@@ -229,10 +238,12 @@ export function generateIntent(world: World, clientIndex: number, prng: Prng): I
   if (hasEntities) {
     const anyRestore = permitted("restore", false);
     const ownRestore = permitted("restore", true);
-    if (anyRestore || ownRestore) {
+    const groupRestore = permitted("renameGroup", true);
+    if (anyRestore || ownRestore || groupRestore) {
       const restorable: Accept = (id, k) => {
         if (k === "action" || !isDeleted(id)) return false;
-        return k === "group" || anyRestore || isOwn(id);
+        if (k === "group") return groupRestore;
+        return anyRestore || isOwn(id);
       };
       candidates.push([
         "restore",
@@ -245,19 +256,20 @@ export function generateIntent(world: World, clientIndex: number, prng: Prng): I
     }
   }
 
-  // createGroup/renameGroup — не гейтится T-011 (classifyAction возвращает
-  // null для group), доступно всегда, кроме viewer (уже исключён выше).
-  candidates.push([
-    "createGroup",
-    weightOf("createGroup"),
-    () => ({
-      type: "createGroup",
-      column: pickOne(prng, COLUMNS),
-      frac: randomFrac(prng),
-      title: prng.word(),
-    }),
-  ]);
-  if (hasEntities) {
+  // createGroup/renameGroup гейтятся с T-016 (editGroup): участнику — только в фазе group.
+  if (permitted("createGroup", true)) {
+    candidates.push([
+      "createGroup",
+      weightOf("createGroup"),
+      () => ({
+        type: "createGroup",
+        column: pickOne(prng, COLUMNS),
+        frac: randomFrac(prng),
+        title: prng.word(),
+      }),
+    ]);
+  }
+  if (hasEntities && permitted("renameGroup", true)) {
     candidates.push([
       "renameGroup",
       weightOf("renameGroup"),
@@ -266,8 +278,10 @@ export function generateIntent(world: World, clientIndex: number, prng: Prng): I
         return id === undefined ? null : { type: "renameGroup", id, title: prng.word() };
       },
     ]);
+  }
 
-    // editAction/assign/setDone — не гейтятся T-011, всегда доступны при наличии цели.
+  // editAction/assign/setDone гейтятся с T-019 (editAction): участнику — только discuss/actions.
+  if (hasEntities && permitted("editAction", true)) {
     candidates.push([
       "editAction",
       weightOf("editAction"),

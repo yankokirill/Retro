@@ -319,7 +319,7 @@
 ### T-019: Action items
 
 - **REQ:** REQ-017, REQ-018 (кр. 1, 3), REQ-019 (кр. 1)
-- **Статус:** todo
+- **Статус:** review — ветка `feat/T-019-action-items`
 - **Размер:** M
 - **Зависит от:** T-002, T-015
 - **Затрагивает:** apps/web, packages/server-core (`classifyAction`/`checkPermission` для `assignee`/`done`/удаления action item — сейчас `null`, см. `docs/security/permissions.md` § «Сознательно не в T-011», находка независимой проверки 2026-09-22)

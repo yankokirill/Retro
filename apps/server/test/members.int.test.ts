@@ -90,7 +90,7 @@ describe("REQ-003: GET /api/boards/:boardId/members", () => {
     expect(res.statusCode).toBe(404);
   });
 
-  it("REQ-003 кр.2: participant и viewer получают 403 forbidden", async () => {
+  it("REQ-003 кр.2 (T-019): participant и viewer получают 403 forbidden, пока фаза collect", async () => {
     const owner = newGuestId();
     const { boardId, participantLink, viewerLink } = await createBoard(owner);
     const participant = newGuestId();
@@ -103,6 +103,43 @@ describe("REQ-003: GET /api/boards/:boardId/members", () => {
       expect(res.statusCode).toBe(403);
       expect(res.json().error).toBe("forbidden");
     }
+  });
+
+  it.each(["group", "vote", "discuss", "actions"])(
+    "REQ-003 кр.2 (T-019): participant и viewer получают 200 после reveal (фаза %s)",
+    async (phase) => {
+      const owner = newGuestId();
+      const { boardId, participantLink, viewerLink } = await createBoard(owner, "Оля");
+      const participant = newGuestId();
+      const viewer = newGuestId();
+      await join(participantLink, participant, "Аня");
+      await join(viewerLink, viewer, "Боря");
+      await pool.query("UPDATE boards SET phase = $1, reveal_seq = 0 WHERE id = $2", [
+        phase,
+        boardId,
+      ]);
+
+      for (const guest of [participant, viewer]) {
+        const res = await listMembers(boardId, guest);
+        expect(res.statusCode).toBe(200);
+        expect(membersResponseSchema.parse(res.json()).members.map((m) => m.guestId)).toEqual([
+          owner,
+          participant,
+          viewer,
+        ]);
+      }
+    },
+  );
+
+  it("REQ-003 кр.2 (T-019): owner получает 200 и в collect, и после reveal; чужой гость — 404 в любой фазе", async () => {
+    const owner = newGuestId();
+    const { boardId } = await createBoard(owner);
+    expect((await listMembers(boardId, owner)).statusCode).toBe(200);
+    await pool.query("UPDATE boards SET phase = 'discuss', reveal_seq = 0 WHERE id = $1", [
+      boardId,
+    ]);
+    expect((await listMembers(boardId, owner)).statusCode).toBe(200);
+    expect((await listMembers(boardId, newGuestId())).statusCode).toBe(404);
   });
 
   it("REQ-003 кр.2: owner получает 200, владелец первым, поля guestId/displayName/role", async () => {
@@ -157,6 +194,15 @@ describe("REQ-003: GET /api/boards/:boardId/members", () => {
     expect(roles[facilitator]).toBe("facilitator");
     expect(roles[owner]).toBe("owner");
     expect(roles[other]).toBe("participant");
+  });
+
+  it("REQ-003 кр.2 (T-019): facilitator получает 200 и в collect", async () => {
+    const owner = newGuestId();
+    const { boardId, participantLink } = await createBoard(owner);
+    const facilitator = newGuestId();
+    await join(participantLink, facilitator, "Фаня");
+    await grantFacilitator(db, { boardId, granterGuestId: owner, targetGuestId: facilitator });
+    expect((await listMembers(boardId, facilitator)).statusCode).toBe(200);
   });
 
   it("REQ-003 кр.2: участники другой доски в список не попадают", async () => {

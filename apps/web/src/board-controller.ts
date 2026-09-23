@@ -59,6 +59,10 @@ export interface BoardController {
   createGroup(column: Column, title: string): ActResult;
   renameGroup(id: EntityId, title: string): ActResult;
   setGroup(cardId: EntityId, groupId: EntityId | null): ActResult;
+  createAction(text: string): ActResult;
+  editAction(id: EntityId, text: string): ActResult;
+  assign(id: EntityId, guestId: string | null): ActResult;
+  setDone(id: EntityId, done: boolean): ActResult;
   vote(target: EntityId): ActResult;
   unvote(target: EntityId): ActResult;
   /** Команды метаданных (T-018): `false` — команда не ушла (клиент не `welcomed`). */
@@ -203,6 +207,18 @@ export function createBoardController(deps: {
     },
     setGroup: (cardId, groupId) =>
       run(client.act({ type: "setGroup", id: cardId, group: groupId })),
+    createAction(rawText) {
+      const text = rawText.trim();
+      if (text === "") return { ok: false, reason: "invalid_intent" };
+      return run(client.act({ type: "createAction", text }));
+    },
+    editAction(id, rawText) {
+      const text = rawText.trim();
+      if (text === "") return { ok: false, reason: "invalid_intent" };
+      return run(client.act({ type: "editAction", id, text }));
+    },
+    assign: (id, guestId) => run(client.act({ type: "assign", id, guestId })),
+    setDone: (id, done) => run(client.act({ type: "setDone", id, done })),
     vote: (target) => run(client.act({ type: "vote", target })),
     unvote(target) {
       const snapshot = client.inspect();

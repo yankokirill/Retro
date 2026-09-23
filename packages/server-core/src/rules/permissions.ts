@@ -4,8 +4,8 @@
 // `rules/board.ts` `checkSetPhase` (это не CRDT-операция).
 //
 // Сознательно НЕ гейтится в T-011 (см. REQ, которые задача заявляет —
-// docs/tasks.md): поля action item assignee/done/удаление (REQ-018/019),
-// vote/unvote (V7, T-012). Группы (REQ-012/013) гейтятся с T-016. Эти
+// docs/tasks.md): vote/unvote (V7, T-012). Группы (REQ-012/013) гейтятся
+// с T-016, action items (REQ-017/018/019) — с T-019. Эти
 // операции проходят `classifyAction` → `null` → пропускаются без проверки
 // прав — не потому что всем можно, а потому что правило ещё не назначено
 // ни одной задаче.
@@ -24,7 +24,8 @@ export type StickerAction =
   | "assignGroup"
   | "moveSticker"
   | "createGroup"
-  | "editGroup";
+  | "editGroup"
+  | "editAction";
 
 /**
  * Какое действие представляет клиентская дельта, если T-011 вообще его
@@ -53,6 +54,7 @@ export function classifyAction(state: State, delta: WireDelta): StickerAction | 
   if (!entry) return null;
   const kind = entityKind(state, entry.key.entity);
   if (kind === "group") return "editGroup";
+  if (kind === "action") return "editAction";
   if (kind !== "sticker") return null;
   if (entry.key.field === "group") return "assignGroup";
   if (entry.key.field === "place") return "moveSticker";
@@ -106,6 +108,12 @@ export function checkPermission(params: CheckPermissionParams): CheckPermissionR
     case "createSticker":
       if (phase !== "collect" && phase !== "group") {
         return reject("wrong_phase", `createSticker not allowed in phase ${phase}`);
+      }
+      return { ok: true };
+    case "editAction":
+      // REQ-017 кр. 2, REQ-018, REQ-019 кр. 1: как createAction; автора у action item нет.
+      if (phase !== "discuss" && phase !== "actions") {
+        return reject("wrong_phase", `editAction not allowed in phase ${phase}`);
       }
       return { ok: true };
     case "createAction":
