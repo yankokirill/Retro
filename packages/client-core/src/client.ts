@@ -204,12 +204,12 @@ function dependsOnSupersede(closure: RejectClosure, entry: PendingEntry): boolea
 }
 
 export function createSyncClient(config: SyncClientConfig, ports: ClientCorePorts): SyncClient {
-  const actorId = ports.newActorId();
+  const actorId = ports.resume?.actorId ?? ports.newActorId();
   const maxPending = config.maxPending ?? DEFAULT_MAX_PENDING;
 
   let confirmed: State = empty();
-  let pending: PendingEntry[] = [];
-  let clock: Clock = newClock(actorId);
+  let pending: PendingEntry[] = ports.resume ? [...ports.resume.pending] : [];
+  let clock: Clock = ports.resume?.clock ?? newClock(actorId);
   let status: ClientStatus = "offline";
   let lastSeq: number | null = null;
   let role: Role | null = null;
@@ -234,7 +234,7 @@ export function createSyncClient(config: SyncClientConfig, ports: ClientCorePort
   }
 
   function saveOutbox(): void {
-    ports.outbox.save(pending);
+    ports.outbox.save(pending, clock);
   }
 
   function takeFirstMatch(dot: Dot): PendingEntry | null {

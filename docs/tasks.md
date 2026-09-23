@@ -262,7 +262,7 @@
 ### T-014: Клиент синхронизации и очередь
 
 - **REQ:** REQ-002 (кр. 1, 3–4), REQ-023 (кр. 1–2, в браузере), REQ-024 (кр. 1, в браузере)
-- **Статус:** todo
+- **Статус:** review — ветка `feat/T-014-web-sync-adapters`; сделаны адаптеры `apps/web/src/sync` (guest, idb-outbox, session, connection), порт `resume` и `save(entries, clock)` в client-core; UI / точка входа (`main.tsx`) — в T-015
 - **Размер:** M
 - **Зависит от:** T-028
 - **Затрагивает:** apps/web (адаптеры WebSocket и IndexedDB над `@retro/client-core`), packages/client-core (`ClientCorePorts.resume`, ADR-0011)

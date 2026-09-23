@@ -7,9 +7,12 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "test": "echo \"@retro/web: e2e-тесты появятся на вехе В4 (Playwright), unit-тестов пока нет\""
+    "test": "vitest run"
   },
   "dependencies": {
+    "@retro/client-core": "*",
+    "@retro/crdt": "*",
+    "@retro/protocol": "*",
     "react": "19.3.0",
     "react-dom": "19.3.0"
   },
@@ -17,6 +20,8 @@
     "@types/react": "19.2.7",
     "@types/react-dom": "19.2.5",
     "@vitejs/plugin-react": "6.1.1",
-    "vite": "8.3.0"
+    "fake-indexeddb": "^6.2.5",
+    "vite": "8.3.0",
+    "vitest": "^5.0.0"
   }
 }
