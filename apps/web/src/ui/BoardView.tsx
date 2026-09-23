@@ -15,6 +15,8 @@ import type { Role } from "@retro/protocol";
 import { useCallback, useEffect, useState } from "react";
 import { useStore } from "zustand";
 import type { BoardController } from "../board-controller.js";
+import { ActionItemRow } from "./ActionItemRow.js";
+import { AddActionForm } from "./AddActionForm.js";
 import { AddGroupForm } from "./AddGroupForm.js";
 import { AddStickerForm } from "./AddStickerForm.js";
 import { CardItem } from "./CardItem.js";
@@ -116,9 +118,16 @@ export function BoardView({
   const reloadMembers = useCallback(() => {
     loadMembers?.().then(setMembers, () => setMembers(null));
   }, [loadMembers]);
+  // Список участников (`protocol.md` § 7): owner/facilitator всегда, остальные — после reveal.
+  const canListMembers =
+    state.role !== null &&
+    (state.role === "owner" ||
+      state.role === "facilitator" ||
+      (phase !== null && phase !== "collect"));
   useEffect(() => {
-    if (isOwner) reloadMembers();
-  }, [isOwner, reloadMembers]);
+    if (canListMembers && phase !== null) reloadMembers();
+  }, [canListMembers, phase, reloadMembers]);
+  const showActions = phase === "discuss" || phase === "actions";
   const sensors = useSensors(useSensor(PointerSensor), useSensor(KeyboardSensor));
 
   const groups = allGroups(state.view);
@@ -275,6 +284,26 @@ export function BoardView({
           ))}
         </div>
       </DndContext>
+      {showActions && (
+        <section aria-label="Действия" className="actions">
+          <h2>Действия</h2>
+          <ul>
+            {state.view.actions.map((action) => (
+              <ActionItemRow
+                key={action.id}
+                action={action}
+                members={members ?? []}
+                readOnly={readOnly}
+                onEditText={(text) => controller.editAction(action.id, text)}
+                onAssign={(guestId) => controller.assign(action.id, guestId)}
+                onSetDone={(done) => controller.setDone(action.id, done)}
+                onDelete={() => controller.remove(action.id)}
+              />
+            ))}
+          </ul>
+          {!readOnly && <AddActionForm onAdd={(text) => controller.createAction(text)} />}
+        </section>
+      )}
       {isOwner && members !== null && (
         <FacilitatorPanel
           members={members}

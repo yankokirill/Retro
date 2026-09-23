@@ -202,14 +202,14 @@ export type ListMembersResult =
 
 /**
  * T-018, `protocol.md` § 7. `not_found` — как у `getBoardForGuest` (доски нет или гость не участник);
- * `forbidden` — только `owner`/`facilitator` видят список. Порядок — по времени входа, затем по `guestId`.
+ * `forbidden` — до `reveal` список видят только `owner`/`facilitator` (`protocol.md` § 7). Порядок — по времени входа, затем по `guestId`.
  */
 export async function listMembers(
   db: Db,
   params: GetBoardForGuestParams,
 ): Promise<ListMembersResult> {
   const [board] = await db
-    .select({ ownerId: boards.ownerId })
+    .select({ ownerId: boards.ownerId, phase: boards.phase })
     .from(boards)
     .where(and(eq(boards.id, params.boardId), isNull(boards.deletedAt)));
   if (!board) return { kind: "not_found" };
@@ -231,7 +231,10 @@ export async function listMembers(
     memberRole: (own?.role as Role | undefined) ?? null,
   });
   if (!role) return { kind: "not_found" };
-  if (role !== "owner" && role !== "facilitator") return { kind: "forbidden" };
+  // `protocol.md` § 7 (T-019): остальным — только после reveal, до него имена скрыты вместе с авторством.
+  if (role !== "owner" && role !== "facilitator" && board.phase === "collect") {
+    return { kind: "forbidden" };
+  }
   return { kind: "ok", members: rows.map((row) => ({ ...row, role: row.role as Role })) };
 }
 
