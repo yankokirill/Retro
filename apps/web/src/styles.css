@@ -1,0 +1,120 @@
+:root {
+  font-family: system-ui, sans-serif;
+  color-scheme: light dark;
+}
+body {
+  margin: 0;
+  padding: 1rem;
+}
+main,
+.board {
+  max-width: 1200px;
+  margin: 0 auto;
+}
+form {
+  display: grid;
+  gap: 0.5rem;
+  max-width: 24rem;
+}
+header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+}
+.status[data-status="offline"] {
+  color: #b00020;
+}
+.columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+  gap: 1rem;
+}
+.column {
+  border: 1px solid #8884;
+  border-radius: 8px;
+  padding: 0.5rem;
+}
+.column-body {
+  min-height: 4rem;
+  display: grid;
+  gap: 0.5rem;
+}
+.draggable {
+  display: flex;
+  gap: 0.25rem;
+}
+.handle {
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+}
+.card {
+  flex: 1;
+  padding: 0.5rem;
+  border-radius: 6px;
+  color: #111;
+}
+.card[data-color="yellow"] {
+  background: #fff3a3;
+}
+.card[data-color="green"] {
+  background: #c8f0c0;
+}
+.card[data-color="blue"] {
+  background: #bfdcff;
+}
+.card[data-color="pink"] {
+  background: #ffc9de;
+}
+.card[data-color="purple"] {
+  background: #dcc9ff;
+}
+.card p {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin: 0.25rem 0;
+}
+.card [role="alert"] {
+  font-weight: 600;
+  color: #8a4b00;
+}
+.swatch {
+  width: 1.25rem;
+  height: 1.25rem;
+  border-radius: 50%;
+  border: 1px solid #0004;
+  padding: 0;
+}
+.swatch[aria-pressed="true"] {
+  outline: 2px solid currentColor;
+}
+.swatch-yellow {
+  background: #fff3a3;
+}
+.swatch-green {
+  background: #c8f0c0;
+}
+.swatch-blue {
+  background: #bfdcff;
+}
+.swatch-pink {
+  background: #ffc9de;
+}
+.swatch-purple {
+  background: #dcc9ff;
+}
+.add-form {
+  display: grid;
+  gap: 0.25rem;
+  margin-top: 0.5rem;
+}
+.notice {
+  background: #fde7e9;
+  color: #600;
+  padding: 0.25rem 0.5rem;
+  margin: 0.25rem 0;
+  border-radius: 4px;
+}
+.trash {
+  margin-top: 1rem;
+}
