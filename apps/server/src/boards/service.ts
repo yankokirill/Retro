@@ -13,7 +13,7 @@
 
 import type { Role } from "@retro/protocol";
 import { resolveRole } from "@retro/server-core";
-import { and, eq, isNull, or } from "drizzle-orm";
+import { and, asc, eq, isNull, or } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "../db/schema.js";
 import { boards, members } from "../db/schema.js";
@@ -139,7 +139,7 @@ export interface BoardForGuest {
   /** T-026, ВС-2(б): seq доски на момент reveal; `null`, пока `collect`. */
   readonly revealSeq: number | null;
   readonly voteLimit: number;
-  readonly timer: null;
+  readonly timer: { readonly endsAt: string } | null;
   readonly authors: Record<string, string>;
   readonly role: Role;
 }
@@ -154,7 +154,7 @@ export interface BoardForGuest {
  * смены фазы — `handlers/command.ts`): вернуться в `collect` нельзя, значит
  * любая другая фаза доказывает, что доска его уже покинула. `authors` —
  * пусто до reveal (REQ-006), после — из `authorsDisplayNames` (T-013, `ops/authors.ts`).
- * `timer` — фиксированное значение, вне T-013 (REQ-019, отдельная задача).
+ * `timer` — из `boards.timer_ends_at` (T-030, REQ-027).
  */
 export async function getBoardForGuest(
   db: Db,
@@ -186,10 +186,53 @@ export async function getBoardForGuest(
     revealed,
     revealSeq: board.revealSeq,
     voteLimit: board.settings.voteLimit,
-    timer: null,
+    timer: board.timerEndsAt ? { endsAt: board.timerEndsAt.toISOString() } : null,
     authors: revealed ? await authorsDisplayNames(db, board.id) : {},
     role,
   };
+}
+
+export type ListMembersResult =
+  | {
+      readonly kind: "ok";
+      readonly members: { guestId: string; displayName: string; role: Role }[];
+    }
+  | { readonly kind: "not_found" }
+  | { readonly kind: "forbidden" };
+
+/**
+ * T-018, `protocol.md` § 7. `not_found` — как у `getBoardForGuest` (доски нет или гость не участник);
+ * `forbidden` — только `owner`/`facilitator` видят список. Порядок — по времени входа, затем по `guestId`.
+ */
+export async function listMembers(
+  db: Db,
+  params: GetBoardForGuestParams,
+): Promise<ListMembersResult> {
+  const [board] = await db
+    .select({ ownerId: boards.ownerId })
+    .from(boards)
+    .where(and(eq(boards.id, params.boardId), isNull(boards.deletedAt)));
+  if (!board) return { kind: "not_found" };
+
+  const rows = await db
+    .select({
+      guestId: members.userId,
+      displayName: members.displayName,
+      role: members.role,
+    })
+    .from(members)
+    .where(eq(members.boardId, params.boardId))
+    .orderBy(asc(members.joinedAt), asc(members.userId));
+
+  const own = rows.find((row) => row.guestId === params.guestId);
+  const role = resolveRole({
+    ownerId: board.ownerId,
+    guestId: params.guestId,
+    memberRole: (own?.role as Role | undefined) ?? null,
+  });
+  if (!role) return { kind: "not_found" };
+  if (role !== "owner" && role !== "facilitator") return { kind: "forbidden" };
+  return { kind: "ok", members: rows.map((row) => ({ ...row, role: row.role as Role })) };
 }
 
 export type GrantFacilitatorResult = "ok" | "not_owner" | "target_not_member";

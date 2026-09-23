@@ -13,7 +13,7 @@ import {
   values,
   winner,
 } from "@retro/crdt";
-import type { BoardMeta, Role } from "@retro/protocol";
+import type { BoardMeta, Phase, Role } from "@retro/protocol";
 import { createStore, type StoreApi } from "zustand/vanilla";
 import { fracBetween } from "./frac.js";
 import { describeRejection } from "./messages.js";
@@ -48,6 +48,11 @@ export interface BoardController {
   moveTo(id: EntityId, column: Column, index: number): ActResult;
   remove(id: EntityId): ActResult;
   restore(id: EntityId): ActResult;
+  /** Команды метаданных (T-018): `false` — команда не ушла (клиент не `welcomed`). */
+  setPhase(phase: Phase): boolean;
+  grantFacilitator(guestId: string): boolean;
+  startTimer(seconds: number): boolean;
+  stopTimer(): boolean;
 }
 
 const placeOf = (state: State, id: EntityId): Place | undefined =>
@@ -59,6 +64,7 @@ export function createBoardController(deps: {
 }): BoardController {
   const { client } = deps;
   let shownRejections = 0;
+  let shownCommandFailures = 0;
   let nextNoticeId = 1;
 
   const initial = client.inspect();
@@ -86,6 +92,8 @@ export function createBoardController(deps: {
     const snapshot = client.inspect();
     const fresh = snapshot.rejections.slice(shownRejections);
     shownRejections = snapshot.rejections.length;
+    const failedCommands = snapshot.commandFailures.slice(shownCommandFailures);
+    shownCommandFailures = snapshot.commandFailures.length;
     const view = snapshot.view;
     store.setState((prev) => ({
       status: snapshot.status,
@@ -96,9 +104,9 @@ export function createBoardController(deps: {
       pendingCount: snapshot.pending.length,
       notices: [
         ...prev.notices,
-        ...fresh.map((rejection) => ({
+        ...[...fresh, ...failedCommands].map((failure) => ({
           id: nextNoticeId++,
-          text: describeRejection(rejection.reason),
+          text: describeRejection(failure.reason),
         })),
       ],
     }));
@@ -115,9 +123,20 @@ export function createBoardController(deps: {
     return placeOf(client.inspect().full, item.id)?.frac ?? null;
   };
 
+  function sendCommand(command: Parameters<SyncClient["command"]>[0]): boolean {
+    const lines = client.command(command);
+    if (lines.length === 0) return false;
+    deps.send(lines);
+    return true;
+  }
+
   return {
     store,
     refresh,
+    setPhase: (phase) => sendCommand({ type: "setPhase", phase }),
+    grantFacilitator: (guestId) => sendCommand({ type: "grantFacilitator", guestId }),
+    startTimer: (seconds) => sendCommand({ type: "startTimer", seconds }),
+    stopTimer: () => sendCommand({ type: "stopTimer" }),
     dismissNotice(id) {
       store.setState((prev) => ({ notices: prev.notices.filter((n) => n.id !== id) }));
     },

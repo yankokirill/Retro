@@ -216,6 +216,7 @@ export function createSyncClient(config: SyncClientConfig, ports: ClientCorePort
   let meta: BoardMeta | null = null;
   let voterToken: string | null = null;
   let rejections: Rejection[] = [];
+  let commandFailures: { id: string; reason: RejectReason }[] = [];
 
   // X_c ⊔ ⨆P, мемо по идентичности confirmed/pending (оба только заменяются).
   // Одно и то же состояние нужно экрану (view), очередному `act` и проверкам
@@ -386,6 +387,12 @@ export function createSyncClient(config: SyncClientConfig, ports: ClientCorePort
         if (parsed.role !== undefined) role = parsed.role;
         return [];
       case "commandResult":
+        if (!parsed.ok) {
+          commandFailures = [
+            ...commandFailures,
+            { id: parsed.id, reason: parsed.reason ?? "invalid_shape" },
+          ];
+        }
         return [];
       case "error":
         status = "offline";
@@ -428,6 +435,7 @@ export function createSyncClient(config: SyncClientConfig, ports: ClientCorePort
       role,
       meta,
       voterToken,
+      commandFailures,
       rejections,
     };
   }

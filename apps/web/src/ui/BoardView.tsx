@@ -11,10 +11,15 @@ import {
   useSensors,
 } from "@dnd-kit/core";
 import type { CardView, Column, Item } from "@retro/crdt";
+import type { Role } from "@retro/protocol";
+import { useCallback, useEffect, useState } from "react";
 import { useStore } from "zustand";
 import type { BoardController } from "../board-controller.js";
 import { AddStickerForm } from "./AddStickerForm.js";
 import { CardItem } from "./CardItem.js";
+import { FacilitatorPanel } from "./FacilitatorPanel.js";
+import { PhaseBar } from "./PhaseBar.js";
+import { TimerPanel } from "./TimerPanel.js";
 import { TrashPanel } from "./TrashPanel.js";
 
 const COLUMNS: readonly { id: Column; title: string }[] = [
@@ -64,8 +69,36 @@ function ColumnDrop({ id, children }: { id: Column; children: React.ReactNode })
   );
 }
 
-export function BoardView({ controller }: { controller: BoardController }) {
+type Members = { guestId: string; displayName: string; role: Role }[];
+
+/** Текущее время раз в секунду — для обратного отсчёта таймера. */
+function useNow(): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const handle = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(handle);
+  }, []);
+  return now;
+}
+
+export function BoardView({
+  controller,
+  loadMembers,
+}: {
+  controller: BoardController;
+  loadMembers?: () => Promise<Members>;
+}) {
   const state = useStore(controller.store);
+  const now = useNow();
+  const [members, setMembers] = useState<Members | null>(null);
+  const isOwner = state.role === "owner";
+
+  const reloadMembers = useCallback(() => {
+    loadMembers?.().then(setMembers, () => setMembers(null));
+  }, [loadMembers]);
+  useEffect(() => {
+    if (isOwner) reloadMembers();
+  }, [isOwner, reloadMembers]);
   const readOnly = state.role === "viewer";
   const sensors = useSensors(useSensor(PointerSensor), useSensor(KeyboardSensor));
 
@@ -100,6 +133,23 @@ export function BoardView({ controller }: { controller: BoardController }) {
           {state.pendingCount > 0 ? ` · не отправлено: ${state.pendingCount}` : ""}
         </span>
       </header>
+      {state.meta && (
+        <>
+          <PhaseBar
+            phase={state.meta.phase}
+            role={state.role}
+            onSetPhase={(phase) => controller.setPhase(phase)}
+          />
+          <TimerPanel
+            phase={state.meta.phase}
+            timer={state.meta.timer}
+            role={state.role}
+            now={now}
+            onStart={(seconds) => controller.startTimer(seconds)}
+            onStop={() => controller.stopTimer()}
+          />
+        </>
+      )}
       <div className="notices">
         {state.notices.map((notice) => (
           <div key={notice.id} role="status" className="notice">
@@ -139,6 +189,16 @@ export function BoardView({ controller }: { controller: BoardController }) {
           ))}
         </div>
       </DndContext>
+      {isOwner && members !== null && (
+        <FacilitatorPanel
+          members={members}
+          onGrant={(guestId) => {
+            controller.grantFacilitator(guestId);
+            // Ответ сервера owner'у не несёт новой роли цели — перечитываем список чуть позже.
+            setTimeout(reloadMembers, 500);
+          }}
+        />
+      )}
       <TrashPanel
         items={state.trash}
         readOnly={readOnly}

@@ -36,6 +36,11 @@ export const joinBoardResponseSchema = z.object({
 /** `GET /api/boards/:boardId` — `BoardMeta` + собственная роль запросившего (не часть `meta`, см. `welcome` в § 5). */
 export const getBoardResponseSchema = boardMetaSchema.extend({ role: roleSchema });
 
+/** `GET /api/boards/:boardId/members` — T-018, `protocol.md` § 7. */
+export const membersResponseSchema = z.object({
+  members: z.array(z.object({ guestId: z.string(), displayName: z.string(), role: roleSchema })),
+});
+
 export const deleteBoardRequestSchema = z.object({ confirm: boardIdSchema });
 
 const exportCardSchema = z.object({
@@ -77,6 +82,7 @@ export type CreateBoardRequest = z.infer<typeof createBoardRequestSchema>;
 export type CreateBoardResponse = z.infer<typeof createBoardResponseSchema>;
 export type JoinBoardResponse = z.infer<typeof joinBoardResponseSchema>;
 export type GetBoardResponse = z.infer<typeof getBoardResponseSchema>;
+export type MembersResponse = z.infer<typeof membersResponseSchema>;
 export type DeleteBoardRequest = z.infer<typeof deleteBoardRequestSchema>;
 export type ExportResponse = z.infer<typeof exportResponseSchema>;
 export type ErrorResponse = z.infer<typeof errorResponseSchema>;

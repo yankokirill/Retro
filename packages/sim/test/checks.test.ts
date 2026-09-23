@@ -802,6 +802,7 @@ describe("SIM-08 / S7: checkNoRejectedResidue — в покое dot из rejecti
         role: "owner" as const,
         meta: null,
         voterToken: null,
+        commandFailures: [],
         rejections: [{ dot: rejectedDot, reason: "wrong_phase" as RejectReason }],
       }),
     };
@@ -860,6 +861,7 @@ describe("SIM-08 / S7: остаток отклонённого голоса и A
         meta: null,
         voterToken: null,
         // отказ на unvote этого голоса несёт dot самого голоса (ADR-0010)
+        commandFailures: [],
         rejections: [{ dot: voted.dot, reason: "wrong_phase" as RejectReason }],
       }),
     };

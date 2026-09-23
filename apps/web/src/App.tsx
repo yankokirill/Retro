@@ -146,7 +146,7 @@ function Board({ api, boardId, displayName }: { api: Api; boardId: string; displ
   }, [api, boardId, displayName]);
   if (error !== null) return <main>{error}</main>;
   if (runtime === null) return <main>Загрузка…</main>;
-  return <BoardView controller={runtime.controller} />;
+  return <BoardView controller={runtime.controller} loadMembers={() => api.listMembers(boardId)} />;
 }
 
 export function App() {
