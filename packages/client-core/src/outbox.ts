@@ -6,7 +6,7 @@
 // каждого изменения P (act/ack/reject), ничего из него не читает сам —
 // это чистый write-through лог для того, кто решит его использовать.
 
-import type { Dot, WireDelta } from "@retro/crdt";
+import type { Clock, Dot, WireDelta } from "@retro/crdt";
 import type { Intent } from "./types.js";
 
 /**
@@ -30,8 +30,12 @@ export interface PendingEntry {
 }
 
 export interface OutboxStore {
-  /** Полная замена содержимого — вызывается после каждого изменения P. */
-  save(entries: readonly PendingEntry[]): void;
+  /**
+   * Полная замена содержимого — вызывается после каждого изменения P. `clock` — актуальные часы
+   * клиента: `actorId` и счётчик dot нельзя вывести из `P` (ADR-0011), а повтор dot после
+   * `reject` недопустим.
+   */
+  save(entries: readonly PendingEntry[], clock: Clock): void;
 }
 
 /**

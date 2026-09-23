@@ -5,7 +5,7 @@
 // без случайности — actorId, id команд и хранилище очереди приходят через
 // `ClientCorePorts`, а не берутся сами.
 
-import type { Color, Column, Dot, EntityId, Place, State, View } from "@retro/crdt";
+import type { Clock, Color, Column, Dot, EntityId, Place, State, View } from "@retro/crdt";
 import type { BoardMeta, Command, RejectReason, Role } from "@retro/protocol";
 import type { OutboxStore, PendingEntry } from "./outbox.js";
 
@@ -65,6 +65,16 @@ export interface ClientCorePorts {
   readonly newCommandId: () => string;
   /** Персистентность очереди P — см. `outbox.ts`, ВС-1. */
   readonly outbox: OutboxStore;
+  /**
+   * Возобновление сессии (ADR-0011): если задано, `createSyncClient` продолжает этого актора с
+   * этими часами и этой очередью (дословно, без пересборки через `act()`); `newActorId` не
+   * вызывается, `outbox.save` при создании тоже.
+   */
+  readonly resume?: {
+    readonly actorId: string;
+    readonly clock: Clock;
+    readonly pending: readonly PendingEntry[];
+  };
 }
 
 export type ActFailureReason = "queue_full" | "not_welcomed_yet" | "invalid_intent";
