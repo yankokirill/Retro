@@ -17,6 +17,7 @@ export interface GuestBoardInfo {
   /** T-026 (ВС-2 б): seq доски на момент reveal; `null`, пока `collect`. */
   readonly revealSeq: number | null;
   readonly voteLimit: number;
+  readonly timerEndsAt: string | null;
   readonly authors: Record<string, string>;
   readonly role: Role;
 }
@@ -45,6 +46,7 @@ export async function getBoardForGuest(
     revealed,
     revealSeq: board.revealSeq,
     voteLimit: board.voteLimit,
+    timerEndsAt: board.timerEndsAt,
     authors: revealed ? await store.authorDisplayNames(boardId) : {},
     role,
   };
@@ -58,7 +60,7 @@ export function buildMeta(boardId: string, guest: GuestBoardInfo): BoardMeta {
     phase: phaseSchema.parse(guest.phase),
     revealed: guest.revealed,
     voteLimit: guest.voteLimit,
-    timer: null,
+    timer: guest.timerEndsAt === null ? null : { endsAt: guest.timerEndsAt },
     authors: guest.authors,
   };
 }

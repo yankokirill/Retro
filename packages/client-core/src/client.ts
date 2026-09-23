@@ -383,6 +383,7 @@ export function createSyncClient(config: SyncClientConfig, ports: ClientCorePort
         return processReject(parsed.dot, parsed.reason);
       case "meta":
         meta = parsed.meta;
+        if (parsed.role !== undefined) role = parsed.role;
         return [];
       case "commandResult":
         return [];

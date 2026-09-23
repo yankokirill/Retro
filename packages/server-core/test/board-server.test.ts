@@ -144,6 +144,9 @@ function createStubBoardStore(config: StubBoardStoreConfig): BoardStore {
     memberRole: (_boardId: string, guestId: string) =>
       record<Role | null>(tagForGuest(guestId), "memberRole", role ?? "participant"),
     updatePhase: (_boardId, _phase, _revealSeq) => record(UNKNOWN_TAG, "updatePhase", undefined),
+    setTimer: (_boardId, _endsAt) => record(UNKNOWN_TAG, "setTimer", undefined),
+    setMemberRole: (_boardId, guestId, _role) =>
+      record(tagForGuest(guestId), "setMemberRole", undefined),
     findOpSeq: (_boardId, dot) => record<number | null>(tagForActor(dot.actor), "findOpSeq", null),
     findUnvoteSeq: (_boardId, voteDot, _target) =>
       record<number | null>(tagForActor(voteDot.actor), "findUnvoteSeq", null),
@@ -233,6 +236,7 @@ describe("SIM-05: атомарность шага сервера (createBoardSer
           phase: "collect",
           voteLimit: 3,
           revealSeq: null,
+          timerEndsAt: null,
         },
       });
 
@@ -302,6 +306,7 @@ describe("SIM-05: атомарность шага сервера (createBoardSer
           phase: "group",
           voteLimit: 3,
           revealSeq: 1,
+          timerEndsAt: null,
         },
       });
 
@@ -361,6 +366,7 @@ describe("SIM-05: атомарность шага сервера (createBoardSer
           phase: "group",
           voteLimit: 3,
           revealSeq: 1,
+          timerEndsAt: null,
         },
       });
 

@@ -49,6 +49,7 @@ export class PgBoardStore implements BoardStore {
         phase: boards.phase,
         settings: boards.settings,
         revealSeq: boards.revealSeq,
+        timerEndsAt: boards.timerEndsAt,
       })
       .from(boards)
       .where(and(eq(boards.id, boardId), isNull(boards.deletedAt)));
@@ -60,6 +61,7 @@ export class PgBoardStore implements BoardStore {
       phase: row.phase as Phase,
       voteLimit: row.settings.voteLimit,
       revealSeq: row.revealSeq,
+      timerEndsAt: row.timerEndsAt?.toISOString() ?? null,
     };
   }
 
@@ -73,6 +75,20 @@ export class PgBoardStore implements BoardStore {
 
   async updatePhase(boardId: string, phase: Phase, revealSeq: number | null): Promise<void> {
     await this.db.update(boards).set({ phase, revealSeq }).where(eq(boards.id, boardId));
+  }
+
+  async setTimer(boardId: string, endsAt: string | null): Promise<void> {
+    await this.db
+      .update(boards)
+      .set({ timerEndsAt: endsAt === null ? null : new Date(endsAt) })
+      .where(eq(boards.id, boardId));
+  }
+
+  async setMemberRole(boardId: string, guestId: string, role: Role): Promise<void> {
+    await this.db
+      .update(members)
+      .set({ role })
+      .where(and(eq(members.boardId, boardId), eq(members.userId, guestId)));
   }
 
   async findOpSeq(boardId: string, dot: Dot): Promise<number | null> {

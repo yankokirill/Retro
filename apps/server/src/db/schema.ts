@@ -45,6 +45,8 @@ export const boards = pgTable("boards", {
   // от него во время collect, seq которых уже <= его собственного lastSeq
   // (см. JSDoc gateway.ts, обработчик hello).
   revealSeq: bigint("reveal_seq", { mode: "number" }),
+  // T-030 (REQ-019 кр. 2, REQ-027): конец таймера обсуждения; null — таймера нет.
+  timerEndsAt: timestamp("timer_ends_at", { withTimezone: true }),
 });
 
 /**

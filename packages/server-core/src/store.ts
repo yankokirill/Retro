@@ -18,6 +18,8 @@ export interface BoardRecord {
   readonly voteLimit: number;
   /** T-026 (ВС-2 б): seq доски в момент первого ухода из collect; null — ещё collect. */
   readonly revealSeq: number | null;
+  /** T-030: конец таймера обсуждения (ISO-8601, UTC); null — таймера нет. */
+  readonly timerEndsAt: string | null;
 }
 
 export interface AppendOpParams {
@@ -74,6 +76,10 @@ export interface BoardStore {
   board(boardId: string): Promise<BoardRecord | null>;
   memberRole(boardId: string, guestId: string): Promise<Role | null>;
   updatePhase(boardId: string, phase: Phase, revealSeq: number | null): Promise<void>;
+  /** T-030: таймер обсуждения (`null` — сбросить). */
+  setTimer(boardId: string, endsAt: string | null): Promise<void>;
+  /** T-030: меняет роль существующего участника; для несуществующего — без эффекта. */
+  setMemberRole(boardId: string, guestId: string, role: Role): Promise<void>;
 
   findOpSeq(boardId: string, dot: Dot): Promise<number | null>;
   findUnvoteSeq(boardId: string, voteDot: Dot, target: EntityId): Promise<number | null>;

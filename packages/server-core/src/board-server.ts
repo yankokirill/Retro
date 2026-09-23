@@ -41,6 +41,11 @@ export interface ServerCorePorts {
   readonly store: BoardStore;
   /** HMAC(секрет, boardId + guestId) — секрет знает только адаптер. */
   readonly voterToken: (boardId: string, guestId: string) => string;
+  /**
+   * Часы (миллисекунды эпохи) — ядро само времени не знает (ADR-0009). Без них таймер обсуждения
+   * недоступен (`startTimer` → `invalid_shape`), остальное работает.
+   */
+  readonly now?: () => number;
   /** Необязательный лог внутренних ошибок; в симуляторе — счётчик. */
   readonly onInternalError?: (
     error: unknown,
@@ -162,6 +167,7 @@ export function createBoardServer(ports: ServerCorePorts): BoardServer {
     const ctx: HandlerContext = {
       store: ports.store,
       voterToken: ports.voterToken,
+      now: ports.now,
       registry,
       sink,
     };

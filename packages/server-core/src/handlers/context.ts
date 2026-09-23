@@ -18,6 +18,7 @@ export interface Sink {
 export interface HandlerContext {
   readonly store: BoardStore;
   readonly voterToken: (boardId: string, guestId: string) => string;
+  readonly now: (() => number) | undefined;
   readonly registry: SubscriberRegistry;
   readonly sink: Sink;
 }

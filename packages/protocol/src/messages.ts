@@ -96,7 +96,12 @@ export const serverMessageSchema = z.discriminatedUnion("type", [
     message: z.string(),
   }),
   z.object({ type: z.literal("op"), seq: seqSchema, delta: wireDeltaSchema }),
-  z.object({ type: z.literal("meta"), meta: boardMetaSchema }),
+  z.object({
+    type: z.literal("meta"),
+    meta: boardMetaSchema,
+    /** Только если у получателя изменилась собственная роль (`grantFacilitator`, T-030). */
+    role: roleSchema.optional(),
+  }),
   z.object({
     type: z.literal("commandResult"),
     id: z.string().min(1).max(64),
