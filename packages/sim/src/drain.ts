@@ -15,8 +15,12 @@ import type { Streams } from "./prng.js";
 import { type Violation, violation } from "./violation.js";
 import type { World } from "./world.js";
 
-/** `B = 10 · (c + 1) · (сообщений в каналах + Σ|P(u)| + c) + 100`, `c` — число клиентов (§ 7 спецификации, SIM-07). */
-function drainBudget(world: World): number {
+/**
+ * `B = 10 · (c + 1) · (сообщений в каналах + Σ|P(u)| + c) + 100 + всплеск reveal`, `c` — число
+ * клиентов (§ 7 спецификации, SIM-07). Экспортирована для теста формулы (drain.test.ts) и для
+ * диагностики упавших прогонов — сама не делает I/O, чистая функция мира.
+ */
+export function drainBudget(world: World): number {
   const inChannels = world.connections.reduce(
     (sum, c) => sum + c.toServer.length + c.toClient.length,
     0,
@@ -25,7 +29,19 @@ function drainBudget(world: World): number {
   const clients = world.clients.length;
   // Каждая операция порождает пересылку, ack и рассылку остальным (~c + 1 сообщений): без множителя
   // c + 1 досылка, которая сходится, но не укладывается в B, давала ложный S9 (замер 2026-09-21).
-  return 10 * (clients + 1) * (inChannels + pendingTotal + clients) + 100;
+  const base = 10 * (clients + 1) * (inChannels + pendingTotal + clients) + 100;
+  // Разовый всплеск reveal (docs/spec/simulator.md § 7): `sendRevealCatchup` при первом уходе из
+  // `collect` рассылает КАЖДОМУ подписчику весь журнал (до logSize строк) одним ответом сервера —
+  // формула выше видит только статический снимок каналов на входе в drain() и не знает, что уже
+  // ОТПРАВЛЕННАЯ, но ещё НЕ ДОСТАВЛЕННАЯ команда setPhase вызовет этот всплеск во время самой
+  // досылки. Пока доска не покинула collect, такая команда может лежать где угодно в очереди —
+  // добавляем запас на весь журнал × число клиентов. После reveal (фаза ≠ collect) второго такого
+  // всплеска быть не может (переход из collect необратим, REQ-004 кр. 2), запас не нужен.
+  // Найдено: замер 2026-09-22, seed=11 профиля chaos, 5 клиентов — один deliver увеличил каналы
+  // на 2837 при logSize=807 (807·5=4035 ≥ 2837 — с запасом).
+  const phase = world.store.boardSync(world.boardId)?.phase ?? "collect";
+  const revealBurst = phase === "collect" ? clients * world.store.logSize(world.boardId) : 0;
+  return base + revealBurst;
 }
 
 export async function drain(
