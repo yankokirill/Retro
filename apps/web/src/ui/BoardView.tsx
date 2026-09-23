@@ -10,14 +10,17 @@ import {
   useSensor,
   useSensors,
 } from "@dnd-kit/core";
-import type { CardView, Column, Item } from "@retro/crdt";
+import type { CardView, Column, GroupView, Item, View } from "@retro/crdt";
 import type { Role } from "@retro/protocol";
 import { useCallback, useEffect, useState } from "react";
 import { useStore } from "zustand";
 import type { BoardController } from "../board-controller.js";
+import { AddGroupForm } from "./AddGroupForm.js";
 import { AddStickerForm } from "./AddStickerForm.js";
 import { CardItem } from "./CardItem.js";
 import { FacilitatorPanel } from "./FacilitatorPanel.js";
+import { GroupItem } from "./GroupItem.js";
+import { GroupSelect } from "./GroupSelect.js";
 import { PhaseBar } from "./PhaseBar.js";
 import { TimerPanel } from "./TimerPanel.js";
 import { TrashPanel } from "./TrashPanel.js";
@@ -31,8 +34,6 @@ const COLUMNS: readonly { id: Column; title: string }[] = [
 ];
 
 const STATUS_TEXT = { offline: "Нет связи", connecting: "Подключение…", welcomed: "На связи" };
-
-const isCard = (item: Item): item is CardView => !("cards" in item);
 
 function DraggableCard({ id, children }: { id: string; children: React.ReactNode }) {
   const { attributes, listeners, setNodeRef, setActivatorNodeRef, isDragging } = useDraggable({
@@ -71,6 +72,19 @@ function ColumnDrop({ id, children }: { id: Column; children: React.ReactNode })
   );
 }
 
+const isGroup = (item: Item): item is GroupView => "cards" in item;
+
+function allGroups(view: View): GroupView[] {
+  const result: GroupView[] = [];
+  for (const items of view.columns.values())
+    for (const item of items) if (isGroup(item)) result.push(item);
+  return result;
+}
+
+function groupOfCard(view: View, cardId: string): GroupView | undefined {
+  return allGroups(view).find((group) => group.cards.some((card) => card.id === cardId));
+}
+
 type Members = { guestId: string; displayName: string; role: Role }[];
 
 /** Текущее время раз в секунду — для обратного отсчёта таймера. */
@@ -107,26 +121,72 @@ export function BoardView({
   }, [isOwner, reloadMembers]);
   const sensors = useSensors(useSensor(PointerSensor), useSensor(KeyboardSensor));
 
+  const groups = allGroups(state.view);
+
   function onDragEnd(event: DragEndEvent): void {
     const active = String(event.active.id);
     const over = event.over ? String(event.over.id) : null;
     if (over === null || over === active) return;
+    const activeIsGroup = groups.some((g) => g.id === active);
+    const activeGroup = groupOfCard(state.view, active);
     const columnIds: readonly string[] = COLUMNS.map((c) => c.id);
+
     if (columnIds.includes(over)) {
+      if (activeGroup) controller.setGroup(active, null);
       controller.moveTo(active, over as Column, Number.MAX_SAFE_INTEGER);
       return;
     }
-    for (const { id: column } of COLUMNS) {
-      const items = state.view.columns.get(column) ?? [];
-      const overIndex = items.findIndex((item) => item.id === over);
-      if (overIndex === -1) continue;
-      const activeIndex = items.findIndex((item) => item.id === active);
-      // Без самого active индексы правее него сдвигаются на 1; при движении вниз вставляем после цели.
-      const without = activeIndex !== -1 && activeIndex < overIndex ? overIndex - 1 : overIndex;
-      const index = activeIndex !== -1 && activeIndex < overIndex ? without + 1 : without;
-      controller.moveTo(active, column, index);
+
+    // Куда указывает `over`: на группу (сама или её стикер) либо на элемент колонки верхнего уровня.
+    const overGroup = groups.find((g) => g.id === over) ?? groupOfCard(state.view, over);
+    if (!activeIsGroup && overGroup) {
+      if (activeGroup?.id !== overGroup.id) controller.setGroup(active, overGroup.id);
       return;
     }
+    const topId = overGroup ? overGroup.id : over;
+    for (const { id: column } of COLUMNS) {
+      const items = state.view.columns.get(column) ?? [];
+      const overIndex = items.findIndex((item) => item.id === topId);
+      if (overIndex === -1) continue;
+      // `moveTo` считает индекс без самого active: вниз (active левее цели) — «после цели»,
+      // вверх — «перед целью»; в обоих случаях это индекс цели в исходном списке.
+      if (activeGroup) controller.setGroup(active, null);
+      controller.moveTo(active, column, overIndex);
+      return;
+    }
+  }
+
+  const groupChoices = groups.map((g) => ({ id: g.id, title: g.title.join(" / ") }));
+
+  function renderCard(card: CardView, groupId: string | null) {
+    return (
+      <DraggableCard key={card.id} id={card.id}>
+        <CardItem
+          card={card}
+          readOnly={readOnly}
+          onEditText={(text) => controller.editText(card.id, text)}
+          onSetColor={(color) => controller.setColor(card.id, color)}
+          onDelete={() => controller.remove(card.id)}
+        />
+        {!readOnly && (
+          <GroupSelect
+            groups={groupChoices}
+            current={groupId}
+            onChange={(next) => controller.setGroup(card.id, next)}
+          />
+        )}
+        {showVotes && (
+          <VoteControls
+            total={card.votes}
+            mine={state.myVotes[card.id] ?? 0}
+            remaining={state.votesLeft ?? 0}
+            interactive={canVote}
+            onVote={() => controller.vote(card.id)}
+            onUnvote={() => controller.unvote(card.id)}
+          />
+        )}
+      </DraggableCard>
+    );
   }
 
   return (
@@ -178,30 +238,38 @@ export function BoardView({
             <section key={id} className="column" aria-label={title}>
               <h2>{title}</h2>
               <ColumnDrop id={id}>
-                {(state.view.columns.get(id) ?? []).filter(isCard).map((card) => (
-                  <DraggableCard key={card.id} id={card.id}>
-                    <CardItem
-                      card={card}
-                      readOnly={readOnly}
-                      onEditText={(text) => controller.editText(card.id, text)}
-                      onSetColor={(color) => controller.setColor(card.id, color)}
-                      onDelete={() => controller.remove(card.id)}
-                    />
-                    {showVotes && (
-                      <VoteControls
-                        total={card.votes}
-                        mine={state.myVotes[card.id] ?? 0}
-                        remaining={state.votesLeft ?? 0}
-                        interactive={canVote}
-                        onVote={() => controller.vote(card.id)}
-                        onUnvote={() => controller.unvote(card.id)}
-                      />
-                    )}
-                  </DraggableCard>
-                ))}
+                {(state.view.columns.get(id) ?? []).map((item) =>
+                  isGroup(item) ? (
+                    <DraggableCard key={item.id} id={item.id}>
+                      <GroupItem
+                        group={item}
+                        readOnly={readOnly}
+                        onRename={(title) => controller.renameGroup(item.id, title)}
+                        onDelete={() => controller.remove(item.id)}
+                      >
+                        {item.cards.map((card) => renderCard(card, item.id))}
+                        {showVotes && (
+                          <VoteControls
+                            total={item.votes}
+                            mine={state.myVotes[item.id] ?? 0}
+                            remaining={state.votesLeft ?? 0}
+                            interactive={canVote}
+                            onVote={() => controller.vote(item.id)}
+                            onUnvote={() => controller.unvote(item.id)}
+                          />
+                        )}
+                      </GroupItem>
+                    </DraggableCard>
+                  ) : (
+                    renderCard(item, null)
+                  ),
+                )}
               </ColumnDrop>
               {!readOnly && (
-                <AddStickerForm onAdd={(text, color) => controller.addSticker(id, text, color)} />
+                <>
+                  <AddStickerForm onAdd={(text, color) => controller.addSticker(id, text, color)} />
+                  <AddGroupForm onAdd={(title) => controller.createGroup(id, title)} />
+                </>
               )}
             </section>
           ))}

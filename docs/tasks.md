@@ -282,7 +282,7 @@
 ### T-016: Группы в интерфейсе
 
 - **REQ:** REQ-011 (кр. 1), REQ-012, REQ-013
-- **Статус:** todo
+- **Статус:** review — ветка `feat/T-016-groups`
 - **Размер:** S
 - **Зависит от:** T-015
 - **Затрагивает:** apps/web, packages/server-core (`classifyAction`/`checkPermission` для `createGroup`/`renameGroup` — сейчас `null`, см. `docs/security/permissions.md` § «Сознательно не в T-011», находка независимой проверки 2026-09-22)
