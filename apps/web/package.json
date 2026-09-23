@@ -10,17 +10,25 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@dnd-kit/core": "^6.3.1",
+    "@dnd-kit/sortable": "^10.0.0",
+    "@dnd-kit/utilities": "^3.2.2",
     "@retro/client-core": "*",
     "@retro/crdt": "*",
     "@retro/protocol": "*",
     "react": "19.3.0",
-    "react-dom": "19.3.0"
+    "react-dom": "19.3.0",
+    "zustand": "^5.0.15"
   },
   "devDependencies": {
+    "@testing-library/dom": "^10.4.2",
+    "@testing-library/react": "^16.3.3",
+    "@testing-library/user-event": "^14.6.7",
     "@types/react": "19.2.7",
     "@types/react-dom": "19.2.5",
     "@vitejs/plugin-react": "6.1.1",
     "fake-indexeddb": "^6.2.5",
+    "jsdom": "^29.1.1",
     "vite": "8.3.0",
     "vitest": "^5.0.0"
   }
