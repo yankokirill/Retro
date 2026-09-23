@@ -20,7 +20,7 @@ export default defineConfig({
       command: "npx tsx src/server.ts",
       cwd: "../apps/server",
       url: `http://localhost:${SERVER_PORT}/healthz`,
-      reuseExistingServer: true,
+      reuseExistingServer: !process.env.CI,
       env: {
         PORT: String(SERVER_PORT),
         DATABASE_URL: process.env.DATABASE_URL ?? "postgres://retro:retro@localhost:5432/retro",
@@ -31,7 +31,7 @@ export default defineConfig({
       command: `npm run dev -w apps/web -- --port ${WEB_PORT} --strictPort`,
       cwd: "..",
       url: `http://localhost:${WEB_PORT}`,
-      reuseExistingServer: true,
+      reuseExistingServer: !process.env.CI,
     },
   ],
 });
