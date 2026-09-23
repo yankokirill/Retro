@@ -2,6 +2,7 @@
 
 import type { ActResult, ClientStatus, SyncClient } from "@retro/client-core";
 import {
+  activeVotes,
   type Color,
   type Column,
   type EntityId,
@@ -10,6 +11,7 @@ import {
   type Place,
   type State,
   type View,
+  type Vote,
   values,
   winner,
 } from "@retro/crdt";
@@ -35,6 +37,12 @@ export interface BoardState {
   readonly view: View;
   readonly trash: TrashItem[];
   readonly pendingCount: number;
+  /** T-017: лимит голосов доски; `null` до `welcome`. */
+  readonly voteLimit: number | null;
+  /** T-017: собственные активные голоса по целям. */
+  readonly myVotes: Record<EntityId, number>;
+  /** T-017: `voteLimit − Σ myVotes` (не меньше 0); `null`, если лимит или `voterToken` неизвестны. */
+  readonly votesLeft: number | null;
   readonly notices: Notice[];
 }
 
@@ -48,6 +56,8 @@ export interface BoardController {
   moveTo(id: EntityId, column: Column, index: number): ActResult;
   remove(id: EntityId): ActResult;
   restore(id: EntityId): ActResult;
+  vote(target: EntityId): ActResult;
+  unvote(target: EntityId): ActResult;
   /** Команды метаданных (T-018): `false` — команда не ушла (клиент не `welcomed`). */
   setPhase(phase: Phase): boolean;
   grantFacilitator(guestId: string): boolean;
@@ -75,8 +85,16 @@ export function createBoardController(deps: {
     view: initial.view,
     trash: [],
     pendingCount: 0,
+    voteLimit: null,
+    myVotes: {},
+    votesLeft: null,
     notices: [],
   }));
+
+  function votesOf(state: State, voterToken: string | null): Vote[] {
+    if (voterToken === null) return [];
+    return activeVotes(state).filter((vote) => vote.user === voterToken);
+  }
 
   function trashOf(state: State, view: View): TrashItem[] {
     return view.trash.map((id) => {
@@ -95,7 +113,18 @@ export function createBoardController(deps: {
     const failedCommands = snapshot.commandFailures.slice(shownCommandFailures);
     shownCommandFailures = snapshot.commandFailures.length;
     const view = snapshot.view;
+    const mine = votesOf(snapshot.full, snapshot.voterToken);
+    const myVotes: Record<EntityId, number> = {};
+    for (const vote of mine) myVotes[vote.target] = (myVotes[vote.target] ?? 0) + 1;
+    const voteLimit = snapshot.meta?.voteLimit ?? null;
+    const votesLeft =
+      voteLimit === null || snapshot.voterToken === null
+        ? null
+        : Math.max(0, voteLimit - mine.length);
     store.setState((prev) => ({
+      voteLimit,
+      myVotes,
+      votesLeft,
       status: snapshot.status,
       role: snapshot.role,
       meta: snapshot.meta,
@@ -156,6 +185,19 @@ export function createBoardController(deps: {
       const at = Math.max(0, Math.min(index, others.length));
       const frac = fracBetween(fracOf(others[at - 1]), fracOf(others[at]));
       return run(client.act({ type: "move", id, place: { column, frac } }));
+    },
+    vote: (target) => run(client.act({ type: "vote", target })),
+    unvote(target) {
+      const snapshot = client.inspect();
+      const own = votesOf(snapshot.full, snapshot.voterToken).filter(
+        (vote) => vote.target === target,
+      );
+      const last = own.reduce<Vote | null>(
+        (best, vote) => (best === null || vote.dot.counter > best.dot.counter ? vote : best),
+        null,
+      );
+      if (last === null) return { ok: false, reason: "invalid_intent" };
+      return run(client.act({ type: "unvote", voteDot: last.dot, target }));
     },
     remove: (id) => run(client.act({ type: "delete", id })),
     restore: (id) => run(client.act({ type: "restore", id })),

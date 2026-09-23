@@ -21,6 +21,8 @@ import { FacilitatorPanel } from "./FacilitatorPanel.js";
 import { PhaseBar } from "./PhaseBar.js";
 import { TimerPanel } from "./TimerPanel.js";
 import { TrashPanel } from "./TrashPanel.js";
+import { VoteBudget } from "./VoteBudget.js";
+import { VoteControls } from "./VoteControls.js";
 
 const COLUMNS: readonly { id: Column; title: string }[] = [
   { id: "start", title: "Начать" },
@@ -91,7 +93,11 @@ export function BoardView({
   const state = useStore(controller.store);
   const now = useNow();
   const [members, setMembers] = useState<Members | null>(null);
+  const readOnly = state.role === "viewer";
   const isOwner = state.role === "owner";
+  const phase = state.meta?.phase ?? null;
+  const showVotes = phase === "vote" || phase === "discuss" || phase === "actions";
+  const canVote = phase === "vote" && !readOnly;
 
   const reloadMembers = useCallback(() => {
     loadMembers?.().then(setMembers, () => setMembers(null));
@@ -99,7 +105,6 @@ export function BoardView({
   useEffect(() => {
     if (isOwner) reloadMembers();
   }, [isOwner, reloadMembers]);
-  const readOnly = state.role === "viewer";
   const sensors = useSensors(useSensor(PointerSensor), useSensor(KeyboardSensor));
 
   function onDragEnd(event: DragEndEvent): void {
@@ -150,6 +155,9 @@ export function BoardView({
           />
         </>
       )}
+      {canVote && state.votesLeft !== null && state.voteLimit !== null && (
+        <VoteBudget remaining={state.votesLeft} limit={state.voteLimit} />
+      )}
       <div className="notices">
         {state.notices.map((notice) => (
           <div key={notice.id} role="status" className="notice">
@@ -179,6 +187,16 @@ export function BoardView({
                       onSetColor={(color) => controller.setColor(card.id, color)}
                       onDelete={() => controller.remove(card.id)}
                     />
+                    {showVotes && (
+                      <VoteControls
+                        total={card.votes}
+                        mine={state.myVotes[card.id] ?? 0}
+                        remaining={state.votesLeft ?? 0}
+                        interactive={canVote}
+                        onVote={() => controller.vote(card.id)}
+                        onUnvote={() => controller.unvote(card.id)}
+                      />
+                    )}
                   </DraggableCard>
                 ))}
               </ColumnDrop>
