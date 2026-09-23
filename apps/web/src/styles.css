@@ -118,3 +118,17 @@ header {
 .trash {
   margin-top: 1rem;
 }
+.phases {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  flex-wrap: wrap;
+  margin: 0.5rem 0;
+}
+.phases [aria-current="step"] {
+  font-weight: 700;
+}
+.timer,
+.members {
+  margin: 0.5rem 0;
+}

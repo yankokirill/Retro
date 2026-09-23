@@ -134,6 +134,35 @@ export function buildApp(deps: AppDeps = {}): FastifyInstance {
     return reply.code(200).send(result);
   });
 
+  // T-018 — docs/spec/protocol.md § 7.
+  app.get<{ Params: { boardId: string } }>(
+    "/api/boards/:boardId/members",
+    async (request, reply) => {
+      const guestId = requireGuestId(request.headers);
+      if (!guestId) {
+        const body: ErrorResponse = { error: "missing_guest_id", message: "X-Guest-Id required" };
+        return reply.code(400).send(body);
+      }
+      const boardId = boardIdSchema.safeParse(request.params.boardId);
+      if (!boardId.success) {
+        return reply.code(400).send(INVALID_SHAPE("boardId must be a UUID"));
+      }
+      const result = await boardsService.listMembers(requireDb(deps.db), {
+        boardId: boardId.data,
+        guestId,
+      });
+      if (result.kind === "not_found") {
+        const body: ErrorResponse = { error: "not_found", message: "board not found" };
+        return reply.code(404).send(body);
+      }
+      if (result.kind === "forbidden") {
+        const body: ErrorResponse = { error: "forbidden", message: "facilitator role required" };
+        return reply.code(403).send(body);
+      }
+      return reply.code(200).send({ members: result.members });
+    },
+  );
+
   // T-009. Отдельный `if`, не `requireDb` — WS-маршрут не нужен тестам
   // /healthz и /, которым БД не нужна вовсе (в отличие от REST-маршрутов
   // досок, которые требуют БД безусловно).

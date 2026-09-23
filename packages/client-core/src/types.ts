@@ -123,6 +123,12 @@ export interface ClientSnapshot {
    * бы невозможен после первого же разрыва связи.
    */
   readonly voterToken: string | null;
+  /**
+   * T-018: отказы команд (`commandResult` с `ok: false`) в порядке получения; без `reason` в
+   * сообщении — `invalid_shape`. Не сбрасывается ни `disconnected()`, ни `welcome`. Успешные
+   * результаты ничего не добавляют.
+   */
+  readonly commandFailures: readonly { readonly id: string; readonly reason: RejectReason }[];
   /** Причины отказа своих операций, в порядке получения `reject` (REQ-024 кр. 2). Не усекается. */
   readonly rejections: readonly Rejection[];
 }
@@ -186,9 +192,8 @@ export interface SyncClient {
    *   Возвращает по одному `op` на каждую пересобранную дельту, если
    *   `status === "welcomed"`, иначе `[]` (уйдут со следующим `welcome`).
    * - `meta {meta}` — снимок `meta` заменяется целиком присланным. Возвращает `[]`.
-   * - `commandResult` — наблюдаемого эффекта нет (нет поля в `ClientSnapshot`
-   *   под результаты команд — T-028 не вводит реестр команда→результат, это
-   *   дело UI/T-015). Не бросает. Возвращает `[]`.
+   * - `commandResult` — при `ok: false` запись уходит в `commandFailures`
+   *   (T-018), при `ok: true` эффекта нет. Не бросает. Возвращает `[]`.
    * - `error {reason}` — `status := "offline"` (сервер сам закроет
    *   соединение; `disconnected()` от адаптера, если последует, — идемпотентен).
    *   `X_c`, `P`, `rejections`, `voterToken` не меняются. Возвращает `[]`.

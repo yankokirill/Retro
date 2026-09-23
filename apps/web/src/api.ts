@@ -7,6 +7,8 @@ import {
   GUEST_ID_HEADER,
   getBoardResponseSchema,
   joinBoardResponseSchema,
+  type MembersResponse,
+  membersResponseSchema,
   type Role,
 } from "@retro/protocol";
 import type { z } from "zod";
@@ -29,6 +31,7 @@ export interface Api {
     voteLimit?: number;
   }): Promise<z.infer<typeof createBoardResponseSchema>>;
   join(linkToken: string, displayName: string): Promise<{ boardId: string; role: Role }>;
+  listMembers(boardId: string): Promise<MembersResponse["members"]>;
   getBoard(boardId: string): Promise<(BoardMeta & { role: Role }) | null>;
 }
 
@@ -65,6 +68,10 @@ export function createApi(deps: { fetch: typeof fetch; guestId: string }): Api {
       const query = `displayName=${encodeURIComponent(displayName)}`;
       const response = await call(`/api/boards/join/${encodeURIComponent(linkToken)}?${query}`);
       return parse(response, joinBoardResponseSchema);
+    },
+    async listMembers(boardId) {
+      const response = await call(`/api/boards/${encodeURIComponent(boardId)}/members`);
+      return (await parse(response, membersResponseSchema)).members;
     },
     async getBoard(boardId) {
       const response = await call(`/api/boards/${encodeURIComponent(boardId)}`);
